@@ -461,3 +461,9 @@ It builds on components with their own terms, which apply to their own code:
 The LDM and VRU Basic Service in `python_vru_service/` are Python ports of the
 corresponding C++ implementations in **VaN3Twin / OScar**
 ([DriveX-devs](https://github.com/DriveX-devs)).
+
+---
+
+## 8. Disclaimer
+
+Code development and documentation drafting have been assisted by Claude Code with Claude Fable 5 and Claude Opus 5.
