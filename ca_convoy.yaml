@@ -1,0 +1,153 @@
+description: |-
+  CA (Cooperative Awareness) scenario: 4 independent CAVs approaching the
+  central Town10HD_Opt intersection from its four arms, plus background
+  traffic, bikes and pedestrians. Every CAV drives freely on Traffic Manager
+  autopilot and carries 4 RGB cameras + 1 LiDAR with its OWN YOLOv8 model;
+  camera detections are fused with the LiDAR sweep to estimate the position,
+  velocity and heading of every vehicle / bike / pedestrian it sees.
+  Inspired by dataset_generator/scenario_configs/default.yaml.
+
+# ---- carla world -----------------------------------------------------------
+world:
+  sync_mode: true
+  client_port: 2000
+  fixed_delta_seconds: 0.05          # 20 Hz simulation
+  seed: 11
+  weather:
+    sun_altitude_angle: 60           # bright day: good camera visibility
+    cloudiness: 0
+    precipitation: 0
+    precipitation_deposits: 0
+    wind_intensity: 0
+    fog_density: 0
+    fog_distance: 0
+    fog_falloff: 0
+    wetness: 0
+
+# ---- scenario --------------------------------------------------------------
+scenario:
+  town: Town10HD_Opt
+  duration_seconds: 40
+  warmup_steps: 10                   # ticks before perception starts
+  # each CAV spawns at its own point and drives freely on TM autopilot
+  # (no convoy / trail following). The four points are the four arms of
+  # the central Town10 intersection:
+  cavs:
+    - name: Cav1
+      spawn_point_index: 29          # bottom-center (South arm)
+      color: '0, 255, 0'
+    - name: Cav2
+      spawn_point_index: 85          # left (West arm)
+      color: '0, 100, 255'
+    - name: Cav3
+      spawn_point_index: 139         # top-left (North arm)
+      color: '255, 150, 0'
+    - name: Cav4
+      spawn_point_index: 134         # right (East arm)
+      color: '200, 0, 200'
+  # with background traffic on the road the CAVs must obey lights,
+  # otherwise cross traffic on green would T-bone them
+  ignore_traffic_lights: false
+  target_speed_perc: 0               # 0 => TM default (30 km/h)
+
+  background_traffic_num: 10         # red autopilot vehicles (TM)
+  bikes:
+    num: 6
+    spawn_near: [-42.0, 25.0]        # around the central intersection
+    spawn_near_radius: 90
+  pedestrians:
+    num: 20
+    spawn_center: [-42.0, 25.0]
+    spawn_radius: 90
+    speed: 1.4                       # m/s
+    cross_factor: 0.1                # fraction of walkers allowed to cross
+
+# ---- sensor rig (per CAV) --------------------------------------------------
+sensing:
+  camera:
+    image_size_x: 1920               # Full-HD cameras
+    image_size_y: 1080
+    fov: 100
+    # relative (x, y, z, yaw) — same layout as the OpenCDA/OPV2V 4-camera rig
+    positions:
+      - [2.5,  0.0, 1.0,    0]      # front
+      - [0.0,  0.3, 1.8,  100]      # right
+      - [0.0, -0.3, 1.8, -100]      # left
+      - [-2.0, 0.0, 1.5,  180]      # rear
+  lidar:
+    z: 1.9                           # mount height above vehicle origin
+    channels: 64
+    range: 100
+    points_per_second: 1300000
+    rotation_frequency: 20           # full sweep every sim tick
+    upper_fov: 2
+    lower_fov: -25
+    dropoff_general_rate: 0.1
+    dropoff_intensity_limit: 0.7
+    dropoff_zero_intensity: 0.2
+    noise_stddev: 0.01
+
+# ---- detection + fusion ----------------------------------------------------
+detection:
+  model_capacity: n                  # n | m | x  (yolov8<capacity>.pt)
+  weights_dir: CA/models
+  confidence: 0.40
+  # COCO ids: 0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
+  classes: [0, 1, 2, 3, 5, 7]
+
+fusion:
+  bbox_shrink: 0.12                  # shrink boxes 12 % per side before picking lidar pts
+  depth_gap: 1.8                     # split depth clusters at gaps > this (m)
+  min_ego_dist: 2.8                  # drop lidar returns on the ego body (m)
+  # per-category parameters (category = vehicle | bike | pedestrian)
+  min_points:                        # min lidar points to accept a detection
+    vehicle: 5
+    bike: 4
+    pedestrian: 4
+  center_offset:                     # surface-centroid -> object-center push (m)
+    vehicle: 1.3
+    bike: 0.5
+    pedestrian: 0.3
+  merge_dist:                        # cross-camera merge radius in world frame (m)
+    vehicle: 2.5
+    bike: 1.5
+    pedestrian: 1.0
+
+# ---- collision avoidance (PyCA, CA/PyCA/t2c.py) -----------------------------
+# Every step, each CAV runs the t2c/s2c check between its own TRUE state
+# (position/velocity/acceleration from the simulator: a real vehicle knows
+# its own kinematics) and every confirmed track (fused position + Kalman
+# velocity, constant-velocity assumption). Raw t2c/s2c go to metrics.csv and
+# the frame infographic; the thresholds below only gate the ca_warning flag.
+# t2c_th is fixed by default (run_ca_extended.py --fixed-t2c-threshold, matching
+# the edge); pass --no-fixed-t2c-threshold to restore speed-scaling above 50 km/h.
+collision:
+  t2c_th: 4.8                        # time-to-collision threshold (s)
+  s2c_th: 4.2                        # space-to-collision threshold (m)
+  alpha_th_deg: 17.0                 # heading diff below this = rear-end pair
+  check_rear_end: false              # experiment scope: cross-road only
+  stale_after_s: 0.5                  # fixed edge-state TTL (500 ms)
+  # warning_cooldown: edge-only per-pair warning dedup [s]. The campaign runs
+  # with it disabled (--no-warning-cooldown) so edge warnings are per-frame like
+  # the on-board/GT streams; historical default was 2.0 s.
+
+tracking:
+  gate_dist:                         # association gate (m); tight for
+    vehicle: 3.0                     # pedestrians to avoid identity swaps
+    bike: 2.5                        # in groups
+    pedestrian: 1.5
+  accel_noise: 3.5                   # Kalman process noise (m/s^2)
+  meas_noise: 0.30                   # Kalman measurement noise (m)
+  confirm_hits: 3
+  max_misses: 10
+  min_speed_for_heading: 1.0         # below this, hold last heading (m/s)
+
+# ---- evaluation / output ---------------------------------------------------
+output:
+  root: CA/output
+  save_stride: 20                    # save annotated frames every N steps
+  print_stride: 20                   # console status every N steps
+  eval_match_dist:                   # max distance to match a track to a GT object
+    vehicle: 4.0
+    bike: 2.5
+    pedestrian: 2.0

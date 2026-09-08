@@ -1,0 +1,157 @@
+# =============================================================================
+# CA — Cooperative Awareness experiments
+#
+# Policy: this repository contains ONLY the code needed to reproduce the
+# experiments. Everything that a run produces (raw campaigns, caches, figures,
+# reports, model weights) is regenerable and stays out of git.
+#
+# Quick check before committing:
+#   git status --porcelain --ignored=no      # what would actually be added
+#   git count-objects -vH                    # repo size after committing
+# =============================================================================
+
+# ---- raw simulation output (this is the 500+ GB one) ------------------------
+/output/
+run_*/
+campaign_*/
+*_launch.log
+bridge_*.log
+bridge_*_send.csv
+bridge_*_recv.csv
+v2x-send.csv
+v2x-recv.csv
+
+# ---- the analysis pipeline lives outside this repository --------------------
+# This repository carries the code that RUNS the experiments and COLLECTS their
+# raw results. Turning those results into figures, tables and reports is a
+# separate concern and is deliberately not published here.
+data_processing/
+fp_precision_analysis/
+*.ipynb
+.ipynb_checkpoints/
+
+# ---- post-processing artifacts (figures, tables, caches) --------------------
+outputs/
+outputs_*/
+.cache/
+
+# ---- campaign drivers superseded by run_campaign.sh -------------------------
+# The original per-campaign scripts are kept on the machines that collected the
+# published campaigns; run_campaign.sh is their generic, parameterised form.
+run_all_experiments*.sh
+run_experiments_*.sh
+
+# ---- data & result files ----------------------------------------------------
+# Nothing in this repository is meant to ship data. Add an explicit exception
+# (e.g. !docs/example.csv) if a small fixture ever becomes necessary.
+*.csv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pcd
+*.ply
+*.db
+*.sqlite3
+
+# ---- figures / rendered documents -------------------------------------------
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.eps
+*.gif
+*.mp4
+*.avi
+# ...unless they are documentation assets committed on purpose:
+!docs/**/*.png
+!docs/**/*.svg
+
+# ---- neural network weights (auto-downloaded by ultralytics) ----------------
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+!models/.gitkeep
+
+# ---- per-machine configuration ----------------------------------------------
+# Copy env.example.sh -> env.sh and put your local paths there; env.sh is never
+# committed, env.example.sh is.
+env.sh
+.env
+*.local.sh
+
+# ---- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- virtual environments -----------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# ---- testing / typing caches ---------------------------------------------------
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+# ---- Jupyter -------------------------------------------------------------------
+profile_default/
+ipython_config.py
+
+# ---- editors / OS ---------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- agent / tooling scratch ------------------------------------------------------
+.claude/
+.codex/
+.agents/
+.mcp.json
+
+# ---- stray logs ---------------------------------------------------------------------
+*.log
+
+# local working document, not part of the reproducible code
+PUBLISHING.md
+PIPELINE.md
+ca_convoy_t2c3_s2c3.yaml

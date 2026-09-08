@@ -1,0 +1,7 @@
+# Normalise line endings.
+* text=auto
+
+# Never diff these as text.
+*.pt      binary
+*.pcd     binary
+*.parquet binary
