@@ -13,7 +13,7 @@ import random
 
 import carla
 
-from dataset_generator.generate_dataset import (
+from CA.traffic_spawners import (
     _BIKE_BLUEPRINTS, _red_background_blueprints)
 
 

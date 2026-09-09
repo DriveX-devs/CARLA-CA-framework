@@ -81,8 +81,8 @@ import opencda.scenario_testing.utils.sim_api as sim_api
 from opencda.core.common.cav_world import CavWorld
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
-# background actor spawners shared with the dataset generator
-from dataset_generator.generate_dataset import (
+# background actor spawners (bundled with this repository)
+from CA.traffic_spawners import (
     spawn_background_traffic, spawn_bikes, spawn_pedestrians)
 from CA.experiment_support import spawn_manifest_traffic
 

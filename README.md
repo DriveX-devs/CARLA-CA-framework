@@ -30,7 +30,7 @@ tracker, evaluation rules and the **complete configuration reference** — is in
 
 ## ⚠️ This repository is a component, not a standalone program
 
-The code imports `opencda.*` and `dataset_generator.*` from
+The code imports `opencda.*` from
 [DriveX-devs/OpenCDA](https://github.com/DriveX-devs/OpenCDA). It **must be
 checked out as the `CA/` sub-directory of an OpenCDA clone**, and every command
 below is run **from the OpenCDA root**, not from inside `CA/`.
@@ -61,7 +61,7 @@ below is run **from the OpenCDA root**, not from inside `CA/`.
 
 | # | component | source | needed for |
 |---|---|---|---|
-| 1 | **OpenCDA** (+ `dataset_generator`) | `github.com/DriveX-devs/OpenCDA` | always — this repo lives inside it |
+| 1 | **OpenCDA** | `github.com/DriveX-devs/OpenCDA` | always — this repo lives inside it |
 | 2 | **CARLA 0.9.12** | `github.com/carla-simulator/carla/releases/tag/0.9.12` | always |
 | 3 | **conda env `msvan3t_carla`** (Python 3.7) | built from OpenCDA's `environment.yml` + extras | always |
 | 4 | **ns-3.46** | `gitlab.com/nsnam/ns-3-dev` | app modes 2 / 3 / 4 |
@@ -80,7 +80,6 @@ configuring anything:
 <workspace>/                     # any directory you like
 ├── OpenCDA/                     # 1. github.com/DriveX-devs/OpenCDA
 │   ├── opencda/
-│   ├── dataset_generator/
 │   └── CA/                      #    ← THIS REPOSITORY
 ├── CARLA_0.9.12/                # 2. CARLA package (CarlaUE4.sh inside)
 └── ns-3-dev/                    # 4. ns-3.46

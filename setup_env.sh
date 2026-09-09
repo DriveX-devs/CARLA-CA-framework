@@ -54,7 +54,7 @@ if [ "$(basename "$SCRIPT_DIR")" = "CA" ]; then
 else
     bad "this repository must be checked out as <OpenCDA>/CA (found '$(basename "$SCRIPT_DIR")')"
 fi
-for d in opencda dataset_generator; do
+for d in opencda; do
     if [ -d "$OPENCDA_ROOT/$d" ]; then
         ok "$d/ found in the parent OpenCDA checkout"
     else
