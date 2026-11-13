@@ -13,7 +13,11 @@ The existing ns-3/5G-LENA client and UDP protocol are not changed.
 | `simu5g_backend.py` | `OpenCDA/CA/simu5g_backend.py` |
 | `simu5g_bridge_client.py` | `OpenCDA/CA/python_vru_service/simu5g_bridge_client.py` |
 | `opencda_v2x.py` | `OpenCDA/CA/python_vru_service/opencda_v2x.py` |
-| `CarlaCoordinator.cc/.h/.ned` | the corresponding files in the OMNeT++ project |
+| 'run_extended.sh' | OpenCDA/CA/run_extended.sh`
+
+After performing the CA clone as mentioned in the main readme, replace the above files inside CA from the main folder
+
+| `CarlaCoordinator.cc/.h/.ned` | the corresponding files in the OMNeT++ project inside the opencda_test directory |
 | `omnetpp.ini` | the Simu5G scenario configuration |
 
 The remaining bundled files are included for completeness and are unchanged
@@ -40,7 +44,7 @@ actor and does not consume one of the mobile UE slots.
 ## Configuration checks
 
 - `*.numUe`, `*.coordinator.numActors`, and the number of CAVs in the OpenCDA
-  scenario must be equal. This bundle is configured for four CAVs.
+  scenario must be equal. This bundle is configured for four CAVs. 
 - `*.server.numApps` must be `1`, with `server.app[0].actorName = "BS"`.
 - The OMNeT++ duration and coordinator step must match OpenCDA's duration and
   fixed delta. The supplied values are 40 seconds and 0.05 seconds.
