@@ -13,13 +13,11 @@ The existing ns-3/5G-LENA client and UDP protocol are not changed.
 | `simu5g_backend.py` | `OpenCDA/CA/simu5g_backend.py` |
 | `simu5g_bridge_client.py` | `OpenCDA/CA/python_vru_service/simu5g_bridge_client.py` |
 | `opencda_v2x.py` | `OpenCDA/CA/python_vru_service/opencda_v2x.py` |
-| 'run_extended.sh' | OpenCDA/CA/run_extended.sh`
+| `run_extended.sh` | `OpenCDA/CA/run_extended.sh` |
+| `CarlaCoordinator.cc/.h/.ned` | `the corresponding files in the OMNeT++ project inside the opencda_test directory` |
+| `omnetpp.ini` | `the Simu5G scenario configuration` |
 
-After performing the CA clone as mentioned in the main readme, replace the above files inside CA from the main folder
-
-| `CarlaCoordinator.cc/.h/.ned` | the corresponding files in the OMNeT++ project inside the opencda_test directory |
-| `omnetpp.ini` | the Simu5G scenario configuration |
-
+After performing the CA clone as mentioned in the main readme, replace the above files (excluding omnet files) inside CA from the main folder.
 The remaining bundled files are included for completeness and are unchanged
 by this milestone.
 
@@ -56,7 +54,7 @@ actor and does not consume one of the mobile UE slots.
 
 ## Build and run
 
-Rebuild the OMNeT++ project after replacing the C++/NED files. Then use this
+Add the omnet files insinde  **opencda_test** as a OMNeT++ project. This project has been tested with OMNeT++ 6.1 and Simu5G 1.3.0. Then use this
 startup order:
 
 1. Start the CARLA server.
