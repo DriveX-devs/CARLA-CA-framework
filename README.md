@@ -1,5 +1,6 @@
 # CA — Cooperative Awareness with camera/LiDAR perception over a simulated 5G network
 
+## ⚠️ This branch has been extended to support runtime co-simulation using Omnet++ with OpenCDA/CARLA. To run the environment using Simu5G in OMNeT++, refer to the readme SIMU5G_MODE2_INTEGRATION.md
 Experimental setup for **cooperative collision avoidance** between connected
 vehicles (CAVs) and vulnerable road users (VRUs) at an urban intersection.
 Four CAVs perceive the scene with **YOLOv8 + LiDAR fusion**, share what they see
