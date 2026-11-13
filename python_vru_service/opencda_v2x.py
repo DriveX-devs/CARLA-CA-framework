@@ -13,11 +13,11 @@
 #     centralized Collision Avoidance service (CA/PyCA/t2c.py, Algorithm 1:
 #     t2c/s2c analytic check), fed with the CAV detections and (optionally)
 #     the received VAMs;
-#   - the ns-3 v2x-bridge (ns-3-dev/scratch/v2x-bridge) through
-#     ns3_bridge_client.py: every CAV->edge detection upload, VRU->edge VAM
-#     and edge->CAV warning is one simulated packet over the 5G NR network,
-#     carrying the actual application payload; the receiver-side logic runs
-#     only when (and if) the bridge reports the packet as delivered.
+#   - a selectable network bridge: the existing ns-3 v2x-bridge or the
+#     lockstep Simu5G adapter. Every CAV->edge detection upload, VRU->edge VAM
+#     and edge->CAV warning is one simulated packet carrying the actual
+#     application payload; receiver-side logic runs only when (and if) the
+#     selected network reports the packet as delivered.
 #
 # Three application modes (used by OpenCDA/CA/run_ca_extended.py):
 #   mode 2: CAVs detect VRUs (no VAMs), store the detections in their local
@@ -538,7 +538,7 @@ class EdgeCAServer:
 # ---------------------------------------------------------------------------
 class V2XLayer:
     """Orchestrates CAV managers, VRU managers (modes 3/4), the edge server
-    and the ns-3 bridge client inside the OpenCDA CA main loop."""
+    and a bridge-compatible network transport in the OpenCDA CA main loop."""
 
     def __init__(self, bridge, mode, carla_map, cav_actors, vru_actors,
                  ca_cfg, run_dir, pump_wait_s=0.25, quiet=True):
@@ -657,11 +657,14 @@ class V2XLayer:
             "uplink_packet_id"])
 
         n_ues = len(self._entity_defs)
-        print("[V2X] mode %d: %d CAV LDM(s), %d VRU VAM service(s), edge "
-              "server with PyCA collision avoidance; %d connected UEs "
-              "(run the v2x-bridge with --maxUes >= %d)"
-              % (self.mode, len(self.cav_managers), len(self.vru_managers),
-                 n_ues, n_ues))
+        backend_name = getattr(self.bridge, "backend_name", "ns-3")
+        print("[V2X] mode %d over %s: %d CAV LDM(s), %d VRU VAM "
+              "service(s), edge server with PyCA collision avoidance; "
+              "%d connected UE(s)"
+              % (self.mode, backend_name, len(self.cav_managers),
+                 len(self.vru_managers), n_ues))
+        if backend_name == "ns-3":
+            print("[V2X] run the v2x-bridge with --maxUes >= %d" % n_ues)
         if not self.upload_detections:
             print("[V2X] V2X-only policy: CAV detections are NOT uploaded "
                   "(ego state only) and the edge checks CAV<->VRU pairs only")
@@ -794,7 +797,7 @@ class V2XLayer:
     # ------------------------------------------------------------------
     def step(self, step_no, sim_time, tracks_by_cav):
         """One co-simulation tick: refresh the scene on the bridge, upload
-        the CAV detections, step the VRU services, then resolve the ns-3
+        the CAV detections, step the VRU services, then resolve network
         deliveries (uplink first, then the warnings they may have caused)."""
         self.step_no = step_no
         self.sim_time = float(sim_time)
@@ -827,8 +830,9 @@ class V2XLayer:
         if self.vam_stats is not None:
             self.vam_stats.close()
         edge = self.edge
-        lines = ["", "V2X layer (mode %d, ns-3 v2x-bridge in the loop):"
-                 % self.mode]
+        backend_name = getattr(self.bridge, "backend_name", "ns-3")
+        lines = ["", "V2X layer (mode %d, %s in the loop):"
+                 % (self.mode, backend_name)]
         lines += ["  " + line for line in self.bridge.summary_lines()]
         lines.append("  edge server : %d detection upload(s) and %d VAM(s) "
                      "received, LDM with %d object(s)"
