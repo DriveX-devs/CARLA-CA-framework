@@ -313,10 +313,11 @@ def validate_campaign(campaign_dir, expected_steps, policies=None,
     the same ground-truth trajectories. `policies` is the set of policy
     indices to check (default: the three original ones, so campaigns
     collected before policy 3 existed keep validating unchanged) and
-    `models` the YOLO capacities collected (default: all three)."""
+    `models` the perception models collected (default: simo)."""
     wanted = DEFAULT_POLICIES if policies is None else set(policies)
-    capacities = ("n", "m", "x") if not models else tuple(models)
-    unknown_models = set(capacities) - {"n", "m", "x"}
+    capacities = ("simo",) if not models else tuple(models)
+    unknown_models = set(capacities) - {"simo", "simo-coop", "n", "m", "x",
+                                        "oracle"}
     if unknown_models:
         fail("unknown model capacity: %s" % ", ".join(sorted(unknown_models)))
     selected = tuple(policy for policy in ALL_POLICIES
@@ -361,7 +362,7 @@ def main():
     campaign_parser.add_argument("--steps", type=int, required=True)
     campaign_parser.add_argument(
         "--models", default=None,
-        help="comma-separated YOLO capacities to validate (default: n,m,x)")
+        help="comma-separated models to validate (default: simo)")
     campaign_parser.add_argument(
         "--policies", default=None,
         help="comma-separated policy indices to validate "

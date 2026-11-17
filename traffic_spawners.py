@@ -12,10 +12,16 @@ wheeled ones, `controller.ai.walker` for the walkers):
     intersection;
   * pedestrians — walkers on the sidewalk navigation mesh.
 
-These functions were previously imported from
-`dataset_generator/generate_dataset.py`; they live here so that `CA/` depends
-only on `opencda.*` and not on the dataset generator. They are pure CARLA
-code (no OpenCDA, no dataset-dumping logic).
+They are pure CARLA code.
+
+Walkers and the LiDAR (CARLA 0.9.16). A walker driven by
+`controller.ai.walker` is moved by the server's crowd navigation with its
+collision and physics switched off: the ray-cast LiDAR goes straight through
+it (zero returns, at any range) and `get_velocity()` reports zero while it
+walks. `make_walkers_sensable()` switches both back on once the walkers are
+on their way, which is what makes pedestrians exist for a LiDAR-based
+detector and gives the ground truth their real speed. Both spawners below
+call it.
 
 `experiment_support.py` reuses the two blueprint pools to replay a recorded
 traffic manifest deterministically.
@@ -35,6 +41,40 @@ import carla
 #   * two-wheelers (bikes, motorbikes): tiny bodies with riders that never
 #     read as a clean colour from above.
 # This is the fix for background vehicles showing up non-red (or green/blue).
+# Ticks between starting the walker controllers and switching the walkers'
+# collision and physics on. Doing it in the very tick the controller starts
+# leaves the walker with an invalid (NaN) position.
+WALKER_SETTLE_TICKS = 10
+
+
+def make_walkers_sensable(world, walkers, settle_ticks=WALKER_SETTLE_TICKS):
+    """Make AI-controlled walkers visible to the LiDAR and give them a
+    velocity (see the module docstring). Ticks the world `settle_ticks`
+    times first. Collisions alone restore the LiDAR returns but leave the
+    reported velocity at zero; physics alone drops the walker through the
+    ground: both are needed.
+
+    Returns the number of walkers left with a valid position."""
+    if not walkers:
+        return 0
+    for _ in range(int(settle_ticks)):
+        world.tick()
+    for walker in walkers:
+        walker.set_collisions(True)
+        walker.set_simulate_physics(True)
+    world.tick()
+    valid = 0
+    for walker in walkers:
+        loc = walker.get_location()
+        if all(math.isfinite(v) for v in (loc.x, loc.y, loc.z)):
+            valid += 1
+    if valid != len(walkers):
+        print('WARNING: %d of %d walkers have an invalid position after '
+              'enabling their physics.' % (len(walkers) - valid,
+                                           len(walkers)))
+    return valid
+
+
 _RED_CAPABLE_CARS = [
     'vehicle.audi.a2',
     'vehicle.audi.etron',
@@ -203,7 +243,7 @@ def spawn_pedestrians(world, client, ped_cfg, seed=None):
     world.set_pedestrians_cross_factor(
         float(ped_cfg.get('cross_factor', 0.1)))
     if seed is not None and hasattr(world, 'set_pedestrians_seed'):
-        world.set_pedestrians_seed(int(seed))   # only exists in CARLA >= 0.9.13
+        world.set_pedestrians_seed(int(seed))
 
     center = ped_cfg.get('spawn_center', None)
     radius = float(ped_cfg.get('spawn_radius', 0) or 0)
@@ -264,5 +304,6 @@ def spawn_pedestrians(world, client, ped_cfg, seed=None):
             controller.go_to_location(target)
         controller.set_max_speed(speed)
 
+    make_walkers_sensable(world, walkers)
     print('Spawned %d pedestrian(s) (%d requested).' % (len(walkers), number))
     return walkers, controllers

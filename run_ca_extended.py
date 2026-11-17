@@ -1,23 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Extended CA (Collision Avoidance) application: the run_ca.py scenario (4
-free-moving CAVs on TM autopilot + background traffic, bikes, pedestrians;
-per-CAV YOLOv8 + LiDAR fusion + Kalman tracking, live ground-truth
-validation) integrated with the python_vru_service LDM / VRU Basic Service
-and the ns-3 v2x-bridge (simulated 5G NR network, ns-3-dev/scratch/
-v2x-bridge). Four application modes (--app-mode):
+The CA (Collision Avoidance) application: 4 free-moving CAVs on TM autopilot
+plus background traffic, bikes and pedestrians in CARLA 0.9.16; per-CAV
+perception (SiMO by default) + Kalman tracking, live ground-truth
+validation, and the V2X side: per-CAV LDMs, an edge server running the PyCA
+centralized collision avoidance, the VRU Basic Service of DriveX, and the
+network simulated by ns-3 through the drivex-bridge (5G NR Uu, IEEE 802.11p,
+IEEE 802.11bd or the NR-V2X sidelink). Four application modes (--app-mode):
 
-  1  local CA (default, same as run_ca.py): every CAV runs the PyCA
-     collision-avoidance check on its own perception output;
-  2  edge CA over 5G: no VAMs; every CAV keeps its detections in its own
-     local LDM and uploads them (with its ego state) to the edge server as
-     simulated 5G packets through the ns-3 bridge; the edge LDM (object
-     matching) + PyCA centralized Collision Avoidance generate the warnings,
-     which are sent back to the involved CAVs over the simulated downlink
-     and logged in the run metrics files when received;
-  3  like 2, but the VRUs (pedestrians and bikes) also run a VRU Basic
-     Service that transmits ETSI VAMs (UPER-encoded, sent through ns-3) to
-     the edge server as additional information for the collision avoidance;
+  1  local CA (default): every CAV runs the PyCA collision-avoidance check
+     on its own perception output;
+  2  edge CA: no VAMs; every CAV keeps its detections in its own local LDM
+     and uploads them (with its ego state) to the edge server as simulated
+     packets through the ns-3 bridge; the edge LDM (object matching) + PyCA
+     centralized Collision Avoidance generate the warnings, which are sent
+     back to the involved CAVs over the simulated network and logged in the
+     run metrics files when received;
+  3  like 2, but the VRUs (pedestrians and bikes) also run DriveX's VRU
+     Basic Service inside ns-3, whose ETSI VAMs reach the edge server over
+     the simulated network as additional information for the collision
+     avoidance;
   4  V2X-only edge CA: the VRUs transmit VAMs exactly as in mode 3, but the
      CAVs upload their own ego state only (no perceived object ever reaches
      the edge) and the edge raises CAV<->VRU risks exclusively -- no CAV<->CAV
@@ -27,22 +29,30 @@ v2x-bridge). Four application modes (--app-mode):
 The local CA of mode 1 keeps running (and being logged) in modes 2/3/4, so
 local and edge collision avoidance can be compared on the same run.
 
-Usage:
-    conda activate msvan3t_carla
-    # modes 2/3/4 need the ns-3 bridge running first (from the ns-3 root):
-    #   ./ns3 run "v2x-bridge --gnbX=-42 --gnbY=25 --maxUes=32"
-    cd OpenCDA
-    python CA/run_ca_extended.py --model n                   # mode 1
-    python CA/run_ca_extended.py --app-mode 2 --seconds 20   # edge CA
-    python CA/run_ca_extended.py --app-mode 3                # edge CA + VAMs
-    python CA/run_ca_extended.py --app-mode 4                # VAM-only edge CA
+Perception (--perception): `simo` (the base model: each CAV runs SiMO on its
+own sensors, optionally fusing the other CAVs' SiMO messages with
+--simo-cooperation ideal), `yolo` (YOLOv8 + camera/LiDAR fusion) or `oracle`
+(ground truth, to test what comes after perception).
 
-Outputs (CA/output/run_<timestamp>/):
-    metrics.csv        one line per step per CAV per identified object, as in
-                       run_ca.py, plus the edge-warning columns (edge
-                       warnings received by that CAV since its previous
-                       metrics row; empty in mode 1)
-    summary.txt        final error + timing statistics + V2X/edge statistics
+Usage (from the repository root, in the framework's conda environment):
+    python run_ca_extended.py                           # mode 1, SiMO
+    python run_ca_extended.py --app-mode 2 --seconds 20 # edge CA
+    python run_ca_extended.py --app-mode 3              # edge CA + VAMs
+    python run_ca_extended.py --app-mode 4              # VAM-only edge CA
+    python run_ca_extended.py --simo-cooperation ideal  # cooperative SiMO
+    python run_ca_extended.py --perception yolo --model n
+Modes 2/3/4 need the drivex-bridge running first: run_extended.sh starts
+CARLA and the bridge for you.
+
+Outputs (output/run_<timestamp>/):
+    metrics.csv        one line per step per CAV per identified object, plus
+                       the edge-warning columns (edge warnings received by
+                       that CAV since its previous metrics row; empty in
+                       mode 1)
+    ap.json            detection AP against CARLA ground truth (centre
+                       distance, SimBEV2X rule), per CAV and pooled
+    summary.txt        final error + timing statistics + AP + V2X/edge
+                       statistics
     v2x_packets.csv    (modes 2/3/4) one line per simulated packet with its
                        ns-3 outcome (delivered/timeout/...) and latency
     edge_warnings.csv  (modes 2/3/4) one line per edge warning delivered to a
@@ -50,13 +60,12 @@ Outputs (CA/output/run_<timestamp>/):
     VBS_stats.csv      (modes 3/4) one line per VAM generated by a VRU Basic
                        Service: content of the message (sender, position,
                        speed, heading), time since the previous VAM of that
-                       VRU, running average VAM periodicity of that VRU and
-                       pooled over all the VRUs, triggering condition
-    <Cav>/<camera>_<step>.png   annotated frames (bbox + fused LiDAR cluster)
+                       VRU, triggering condition, and its fate on the network
+    <Cav>/...png       (--save-stride > 0) annotated camera frames (yolo) or
+                       bird's-eye views (simo / oracle)
 
-See CA/PIPELINE.md for the perception pipeline and
-CA/python_vru_service/README.md + ns-3-dev/scratch/v2x-bridge/README.md for
-the V2X/ns-3 side.
+See README.md for the pipeline and python_vru_service/README.md for the V2X
+side.
 """
 
 import argparse
@@ -65,6 +74,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import random
 import subprocess
 import sys
@@ -75,22 +85,26 @@ import cv2
 import numpy as np
 from omegaconf import OmegaConf
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.realpath(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-import opencda.scenario_testing.utils.sim_api as sim_api
-from opencda.core.common.cav_world import CavWorld
-from opencda.scenario_testing.utils.yaml_utils import add_current_time
+import carla
+
+import ap_eval
+from carla_utils import CarlaSession, add_current_time, transform_matrix
 
 # background actor spawners (bundled with this repository)
-from CA.traffic_spawners import (
+from traffic_spawners import (
     spawn_background_traffic, spawn_bikes, spawn_pedestrians)
-from CA.experiment_support import spawn_manifest_traffic
+from experiment_support import spawn_manifest_traffic
 
-from CA.sensors import SensorRig
-from CA.detector import YoloDetector
-from CA.fusion import CameraLidarFusion, CATEGORIES, suppress_contained
-from CA.tracker import VehicleTracker, wrap_deg
-from CA.PyCA.t2c import t2c as T2CEngine, NO_COLLISION
+from perception import (
+    BACKENDS, CATEGORIES, box_fields, create_backend, lidar_world_points,
+    static_vehicle_ground_truth)
+from bev_render import render_bev
+from tracker import VehicleTracker, wrap_deg
+from PyCA.t2c import t2c as T2CEngine, NO_COLLISION
 
 # annotation colours per category (BGR)
 CATEGORY_COLORS = {'vehicle': (0, 255, 255),      # yellow
@@ -163,7 +177,26 @@ def arg_parse():
         description='4-CAV YOLOv8 + LiDAR cooperative awareness demo, with '
                     'optional edge collision avoidance over a simulated 5G '
                     'network (ns-3 v2x-bridge).')
-    parser.add_argument('--config', type=str, default='CA/ca_convoy.yaml')
+    parser.add_argument('--config', type=str, default='ca_convoy.yaml')
+    parser.add_argument('--perception', type=str, default=None,
+                        choices=BACKENDS,
+                        help='perception backend (default: the yaml '
+                             'perception.backend, simo)')
+    parser.add_argument('--simo-sensors', type=str, default=None,
+                        choices=('lidar', 'camera', 'both'),
+                        help='sensors SiMO runs on (default: yaml)')
+    parser.add_argument('--simo-cooperation', type=str, default=None,
+                        choices=('none', 'ideal'),
+                        help='none: each CAV on its own sensors; ideal: '
+                             'each CAV also fuses the SiMO messages of the '
+                             'CAVs in range, with no network in between')
+    parser.add_argument('--simo-sweeps', type=int, default=None,
+                        help='LiDAR sweeps given to SiMO (default: yaml)')
+    parser.add_argument('--simo-devices', type=str, default=None,
+                        help='comma-separated devices of the SiMO models, '
+                             'e.g. cuda:0,cuda:1 (CAV i on device i mod n)')
+    parser.add_argument('--town', type=str, default=None,
+                        help='CARLA map (default: the yaml scenario.town)')
     parser.add_argument('--app-mode', type=int, default=1,
                         choices=[1, 2, 3, 4],
                         help='1 = local CA only (run_ca.py behavior); '
@@ -243,7 +276,24 @@ def arg_parse():
     parser.add_argument('-p', '--port', type=int, default=None,
                         help='CARLA RPC port (overrides the yaml).')
     parser.add_argument('-tm', '--tm_port', type=int, default=8000)
-    parser.add_argument('-v', '--version', type=str, default='0.9.12')
+    parser.add_argument('--no-ap', action='store_true',
+                        help='skip the detection AP evaluation')
+    parser.add_argument('--no-reload-world', action='store_true',
+                        help='keep the world the CARLA server runs instead '
+                             'of loading the map again: required with '
+                             'CARLA\'s multi-GPU mode, whose servers are '
+                             'started on the scenario map')
+    parser.add_argument('--access', type=str, default=None,
+                        help='access technology the bridge was started '
+                             'with (uu, 11p, 11bd, nrv2x): recorded in the '
+                             'run metadata')
+    parser.add_argument('--topology', type=str, default=None,
+                        help='network topology the bridge was started with '
+                             '(rsu, hybrid): recorded in the run metadata')
+    parser.add_argument('--uplink-stagger-ms', type=float, default=0.0,
+                        help='send the uplink of CAV i (i = 0, 1, ...) '
+                             'i times this many ms after the tick instead '
+                             'of all at the same instant (default 0)')
     return parser.parse_args()
 
 
@@ -261,7 +311,9 @@ def collect_gt(world):
 
     Returns full simulator kinematics for every actor; category
     follows the same taxonomy as the detections: 'vehicle' (4+ wheels),
-    'bike' (2-wheelers, rider included) and 'pedestrian' (walkers).
+    'bike' (2-wheelers, rider included) and 'pedestrian' (walkers). Every
+    object also carries its oriented box ('centre', 'inv', 'extent') and its
+    SimBEV2X class, which is what the detection AP is scored against.
     """
     objs = []
     for v in world.get_actors().filter('vehicle.*'):
@@ -271,26 +323,31 @@ def collect_gt(world):
         center = t.transform(v.bounding_box.location)
         vel = v.get_velocity()
         acc = v.get_acceleration()
-        objs.append({'id': v.id, 'category': category,
-                     'xy': np.array([center.x, center.y]),
-                     'z': center.z,
-                     'vx': vel.x, 'vy': vel.y, 'vz': vel.z,
-                     'ax': acc.x, 'ay': acc.y, 'az': acc.z,
-                     'speed': math.sqrt(vel.x ** 2 + vel.y ** 2 +
-                                        vel.z ** 2),
-                     'yaw': t.rotation.yaw})
+        obj = {'id': v.id, 'category': category,
+               'xy': np.array([center.x, center.y]),
+               'z': center.z,
+               'vx': vel.x, 'vy': vel.y, 'vz': vel.z,
+               'ax': acc.x, 'ay': acc.y, 'az': acc.z,
+               'speed': math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
+               'yaw': t.rotation.yaw,
+               'simbev_class': ap_eval.simbev_class_of(v), 'static': False}
+        obj.update(box_fields(center, t.rotation, v.bounding_box.extent))
+        objs.append(obj)
     for w in world.get_actors().filter('walker.pedestrian.*'):
         t = w.get_transform()
         vel = w.get_velocity()
         acc = w.get_acceleration()
-        objs.append({'id': w.id, 'category': 'pedestrian',
-                     'xy': np.array([t.location.x, t.location.y]),
-                     'z': t.location.z,
-                     'vx': vel.x, 'vy': vel.y, 'vz': vel.z,
-                     'ax': acc.x, 'ay': acc.y, 'az': acc.z,
-                     'speed': math.sqrt(vel.x ** 2 + vel.y ** 2 +
-                                        vel.z ** 2),
-                     'yaw': t.rotation.yaw})
+        obj = {'id': w.id, 'category': 'pedestrian',
+               'xy': np.array([t.location.x, t.location.y]),
+               'z': t.location.z,
+               'vx': vel.x, 'vy': vel.y, 'vz': vel.z,
+               'ax': acc.x, 'ay': acc.y, 'az': acc.z,
+               'speed': math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
+               'yaw': t.rotation.yaw,
+               'simbev_class': 'pedestrian', 'static': False}
+        obj.update(box_fields(t.transform(w.bounding_box.location),
+                              t.rotation, w.bounding_box.extent))
+        objs.append(obj)
     return objs
 
 
@@ -371,15 +428,21 @@ def main():
         raise ValueError('--create-traffic-manifest requires '
                          '--traffic-manifest')
 
-    opencda_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     cfg_path = opt.config if os.path.isabs(opt.config) \
-        else os.path.join(opencda_root, opt.config)
+        else os.path.join(REPO_ROOT, opt.config)
     cfg = OmegaConf.load(cfg_path)
     cfg = add_current_time(cfg)
 
     if opt.port is not None:
         cfg['world']['client_port'] = opt.port
-    capacity = opt.model or str(cfg['detection']['model_capacity'])
+    if opt.town is not None:
+        cfg['scenario']['town'] = opt.town
+    backend_name = opt.perception or str(
+        (cfg.get('perception', None) or {}).get('backend', 'simo'))
+    if opt.model is not None and backend_name != 'yolo':
+        raise ValueError('--model selects a YOLOv8 capacity: it needs '
+                         '--perception yolo (the backend is %s)'
+                         % backend_name)
 
     sc = cfg['scenario']
     duration = opt.seconds if opt.seconds is not None \
@@ -389,10 +452,10 @@ def main():
 
     out_root = cfg['output']['root']
     out_root = out_root if os.path.isabs(out_root) \
-        else os.path.join(opencda_root, out_root)
+        else os.path.join(REPO_ROOT, out_root)
     if opt.run_dir:
         run_dir = opt.run_dir if os.path.isabs(opt.run_dir) \
-            else os.path.join(opencda_root, opt.run_dir)
+            else os.path.join(REPO_ROOT, opt.run_dir)
         protected = ('_SUCCESS', 'run_metadata.json', 'metrics.csv', 'gt.csv')
         if any(os.path.exists(os.path.join(run_dir, name))
                for name in protected):
@@ -430,17 +493,26 @@ def main():
     # (they require asn1tools + geopy)
     app_mode = int(opt.app_mode)
     if app_mode >= 2:
-        from CA.python_vru_service.ns3_bridge_client import Ns3BridgeClient
-        from CA.python_vru_service.opencda_v2x import V2XLayer
-        from CA.python_vru_service import vam_codec
+        from python_vru_service.ns3_bridge_client import Ns3BridgeClient
+        from python_vru_service.ca_v2x import V2XLayer
+        from python_vru_service import vam_codec
 
-    print('=== CA: YOLOv8-%s + LiDAR fusion, %d CAVs ==='
-          % (capacity, len(sc['cavs'])))
+    eval_cfg = cfg.get('evaluation', None) or {}
+    ap_enabled = bool(eval_cfg.get('ap', True)) and not opt.no_ap
+    ap_stride = max(1, int(eval_cfg.get('ap_stride', 1)))
+    ap_skip_steps = int(round(float(eval_cfg.get('ap_skip_seconds', 0.0))
+                              / dt))
+
+    # The models are loaded before touching the simulator: a missing weight
+    # file or GPU must fail before any actor is spawned.
+    backend = create_backend(backend_name, cfg, REPO_ROOT, dt, opt)
+
+    print('=== CA: %s, %d CAVs ===' % (backend.label(), len(sc['cavs'])))
     print('  app mode    : %d (%s)'
           % (app_mode,
              {1: 'local collision avoidance only',
-              2: 'edge collision avoidance over ns-3 5G (no VAMs)',
-              3: 'edge collision avoidance over ns-3 5G + VRU VAMs',
+              2: 'edge collision avoidance over ns-3 (no VAMs)',
+              3: 'edge collision avoidance over ns-3 + VRU VAMs',
               4: 'edge collision avoidance from VRU VAMs + CAV ego states '
                  'only (no CAV detections, CAV<->VRU pairs only)'}
              [app_mode]))
@@ -462,22 +534,34 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
 
-    weights_dir = os.path.join(opencda_root,
-                               str(cfg['detection']['weights_dir']))
-
-    scenario_manager = None
+    session = None
+    ap_evaluation = ap_eval.ApEvaluation(
+        eval_range_m=float(eval_cfg.get('eval_range_m', 54.4)),
+        min_points=int(eval_cfg.get('min_lidar_points', 1))) \
+        if ap_enabled else None
     cavs = []
     bg_list, bike_list = [], []
     walker_list, walker_controllers = [], []
     bridge, v2x_layer = None, None
     try:
         # ---- world -------------------------------------------------------
-        scenario_manager = sim_api.ScenarioManager(
-            cfg, apply_ml=False, carla_version=opt.version,
-            town=str(sc['town']), cav_world=CavWorld(apply_ml=False),
-            carla_host=opt.host, carla_port=int(cfg['world']['client_port']))
-        world = scenario_manager.world
-        client = scenario_manager.client
+        session = CarlaSession(cfg['world'], str(sc['town']), host=opt.host,
+                               port=int(cfg['world']['client_port']),
+                               reload_world=not opt.no_reload_world)
+        world = session.world
+        client = session.client
+        if not bool(sc.get('parked_vehicles', True)):
+            # only layered (*_Opt) maps can drop their parked vehicles
+            world.unload_map_layer(carla.MapLayer.ParkedVehicles)
+            world.tick()
+        elif opt.no_reload_world:
+            # a previous run on this world may have unloaded them
+            world.load_map_layer(carla.MapLayer.ParkedVehicles)
+            world.tick()
+        static_gt = static_vehicle_ground_truth(world)
+        if static_gt:
+            print('  static GT   : %d parked vehicles of the map'
+                  % len(static_gt))
         spawn_points = world.get_map().get_spawn_points()
 
         tm = client.get_trafficmanager(opt.tm_port)
@@ -498,14 +582,7 @@ def main():
             vehicle = world.spawn_actor(bp, sp)
             world.tick()
 
-            # one YOLO model per CAV (only the first announces itself)
-            detector = YoloDetector(
-                capacity, weights_dir,
-                cfg['detection']['confidence'],
-                list(cfg['detection']['classes']),
-                quiet=bool(cavs))
-            rig = SensorRig(world, vehicle, cfg['sensing'])
-            fusion = CameraLidarFusion(cfg['fusion'])
+            rig = backend.make_rig(world, vehicle)
             tracker = VehicleTracker(dt, cfg['tracking'])
 
             vehicle.set_autopilot(True, opt.tm_port)
@@ -517,8 +594,7 @@ def main():
                 tm.vehicle_percentage_speed_difference(vehicle, speed_perc)
 
             cavs.append({'name': str(cav_def['name']), 'vehicle': vehicle,
-                         'detector': detector, 'rig': rig, 'fusion': fusion,
-                         'tracker': tracker,
+                         'rig': rig, 'tracker': tracker,
                          'ca_engine': T2CEngine(node_id=str(cav_def['name']),
                                                 T2C_th=ca_t2c_th),
                          'errors': {c: [] for c in CATEGORIES},
@@ -526,6 +602,7 @@ def main():
                                      ('detect', 'fuse', 'track', 'ca')},
                          'ca_warnings': 0, 'ca_min_t2c': float('inf'),
                          'unmatched': 0})
+            backend.attach(len(cavs) - 1, cavs[-1])
             print('  spawned %s at spawn point %d (%.1f, %.1f, yaw %.0f)'
                   % (cav_def['name'], sp_idx, sp.location.x, sp.location.y,
                      sp.rotation.yaw))
@@ -538,7 +615,7 @@ def main():
         if opt.traffic_manifest:
             manifest_path = opt.traffic_manifest \
                 if os.path.isabs(opt.traffic_manifest) \
-                else os.path.join(opencda_root, opt.traffic_manifest)
+                else os.path.join(REPO_ROOT, opt.traffic_manifest)
             bg_list, bike_list, walker_list, walker_controllers, \
                 traffic_manifest = spawn_manifest_traffic(
                     world, client, tm, opt.tm_port, n_background, bike_cfg,
@@ -598,9 +675,13 @@ def main():
             # pairs exclusively.
             'edge_uses_cav_detections': app_mode != 4,
             'edge_pairs': 'cav_vru_only' if app_mode == 4 else 'all',
-            'model': capacity,
-            'model_name': {'n': 'nano', 'm': 'medium', 'x': 'extra-large'}[
-                capacity],
+            'carla_version': client.get_server_version(),
+            'network': {'access': opt.access, 'topology': opt.topology,
+                        'uplink_stagger_ms': float(opt.uplink_stagger_ms)}
+            if app_mode >= 2 else None,
+            'perception': backend.describe(),
+            'model': getattr(backend, 'capacity', backend.name),
+            'model_name': backend.label(),
             'duration_seconds': duration,
             'fixed_delta_seconds': dt,
             'total_steps': total_steps,
@@ -623,7 +704,7 @@ def main():
             'later_analysis_defaults': {
                 'sensing_ms': dt * 1000.0, 'actuation_ms': 100.0},
             'raw_only': bool(opt.raw_only),
-            'source': _git_state(opencda_root),
+            'source': _git_state(REPO_ROOT),
             'config': OmegaConf.to_container(cfg, resolve=True),
         }
         _write_json(os.path.join(run_dir, 'run_metadata.json'), metadata)
@@ -632,9 +713,6 @@ def main():
         # The stable actor names above (Cav1..4, ped_1..P, bike_1..B) are the
         # origin_IDs used on the ns-3 bridge for the whole run.
         if app_mode >= 2:
-            # VAM redundancy logic uses Python's RNG; keep it reproducible and
-            # independent from manifest creation/replay details.
-            random.seed(seed + 1000)
             bridge = Ns3BridgeClient(opt.bridge_host, opt.bridge_port,
                                      verbose=opt.v2x_verbose)
             vru_defs = [('ped_%d' % i, w, vam_codec.STATION_TYPE_PEDESTRIAN)
@@ -649,22 +727,42 @@ def main():
                  'check_rear_end': False,
                  'warning_cooldown': warning_cooldown},
                 run_dir, pump_wait_s=opt.bridge_wait,
-                quiet=not opt.v2x_verbose)
+                quiet=not opt.v2x_verbose,
+                uplink_stagger_s=float(opt.uplink_stagger_ms) / 1000.0)
 
         # ---- warmup --------------------------------------------------------
         for _ in range(int(sc['warmup_steps'])):
             world.tick()
-        # drain stale sensor frames so the loop starts aligned
-        frame = world.tick()
-        for cav in cavs:
-            cav['rig'].fetch(frame)
+        # drain stale sensor frames so the loop starts aligned. The first
+        # complete set of frames can take a while: with CARLA's multi-GPU
+        # mode the rendering servers load the map after the primary one has,
+        # and what the primary ticks meanwhile is never rendered. Keep
+        # ticking until every sensor of every CAV has answered a tick.
+        sensor_deadline = time.time() + float(
+            cfg['world'].get('sensor_start_timeout_s', 300.0))
+        while True:
+            frame = world.tick()
+            try:
+                for cav in cavs:
+                    cav['rig'].fetch(frame, timeout=5.0)
+                break
+            except queue.Empty:
+                if time.time() > sensor_deadline:
+                    raise RuntimeError(
+                        'the sensors of the CAVs produced no data: is every '
+                        'CARLA rendering server up?')
+                print('  waiting for the sensors to start...')
 
         # ---- metrics csv ---------------------------------------------------
         # one line per step per CAV per identified (confirmed) object;
         # ground-truth columns are empty when no GT object matches. The
         # t_*_ms columns repeat, on every row of the same step+CAV, the
         # wall-clock time that CAV's pipeline spent on that step, split
-        # per operation (YOLO detection / camera-LiDAR fusion / tracking).
+        # per operation. t_detect_ms is the CAV's local stage (SiMO: input
+        # preparation + encoding of its own sensors; yolo: the YOLOv8
+        # batch), t_fuse_ms what turns it into detections (SiMO: fusion with
+        # the received messages, if any, + decoding; yolo: camera-LiDAR
+        # fusion), t_track_ms the tracker.
         csv_file = open(os.path.join(run_dir, 'metrics.csv'), 'w', newline='')
         writer = csv.writer(csv_file)
         # The edge_warn_* columns (modes 2/3/4, empty in mode 1) repeat, on
@@ -710,8 +808,8 @@ def main():
              'association_distance_m'])
 
         # dedicated per-step per-CAV wall-clock timing log (one row per CAV
-        # per step: YOLO inference, fusion, tracking, local collision
-        # avoidance), consumed by CA/analyze_ca_metrics.py to build the
+        # per step: detection, fusion, tracking, local collision
+        # avoidance), consumed by analyze_ca_metrics.py to build the
         # end-to-end warning latency
         timing_file = open(os.path.join(run_dir, 'timing.csv'), 'w',
                            newline='')
@@ -797,27 +895,73 @@ def main():
                         '1' if range_admitted and warn_t2c != NO_COLLISION else '0',
                         ca_type])
 
-            for cav in cavs:
-                rig, fusion = cav['rig'], cav['fusion']
-                images, points = rig.fetch(frame)
+            # ---- perception, local stage: every CAV on its own sensors --
+            # (all of them before any detection, so that a cooperative
+            # backend finds every CAV's local result of this step)
+            score_ap = ap_evaluation is not None and \
+                step >= ap_skip_steps and step % ap_stride == 0
+            save_frames = save_stride > 0 and step % save_stride == 0
+            need_counts = score_ap or backend.name == 'oracle' or \
+                (save_frames and backend.name != 'yolo')
+            eval_objects = gt_all + static_gt
+            for idx, cav in enumerate(cavs):
+                images, points = cav['rig'].fetch(frame)
+                cav['images'], cav['points'] = images, points
+                cav['t_detect'] = backend.local_stage(idx, cav, step, t_sim,
+                                                      images, points)
+                if need_counts:
+                    # LiDAR returns of this sweep inside every ground-truth
+                    # box: what this CAV's sensor actually reaches
+                    cav['point_counts'] = ap_eval.points_in_boxes(
+                        lidar_world_points(
+                            points, cav['rig'].lidar.sensor.get_transform()),
+                        eval_objects)
 
-                t0 = time.perf_counter()
-                cam_dets = cav['detector'].detect_batch(images)
-                t1 = time.perf_counter()
+            for idx, cav in enumerate(cavs):
+                rig = cav['rig']
+                images, points = cav['images'], cav['points']
+                # everything but the CAV itself can be detected by it
+                not_ego = [i for i, g in enumerate(eval_objects)
+                           if g['id'] != cav['vehicle'].id]
+                gt_objects = [eval_objects[i] for i in not_ego]
+                own_counts = cav['point_counts'][not_ego] \
+                    if need_counts else None
+                result = backend.detect(idx, cav, cavs, gt_objects,
+                                        own_counts)
+                merged = result.detections
+                t_detect, t_fuse = cav['t_detect'], result.t_fuse_ms
 
-                world_pts = fusion.lidar_to_world(points, rig.lidar.sensor)
-                fused = []
-                for i, cam in enumerate(rig.cameras):
-                    if not cam_dets[i]:
-                        continue
-                    dets_2d = suppress_contained(cam_dets[i])
-                    uv, depth, wxyz = fusion.project_to_camera(world_pts,
-                                                               cam.sensor)
-                    fused += fusion.fuse_camera(dets_2d, uv, depth, wxyz,
-                                                i, cam.sensor)
-                merged = fusion.merge_detections(fused)
+                if score_ap:
+                    world_to_cav = np.linalg.inv(transform_matrix(
+                        rig.lidar.sensor.get_transform()))
+                    counts = own_counts
+                    stream = 'single'
+                    if backend.cooperative:
+                        # an object counts when any contributing CAV's
+                        # LiDAR reaches it
+                        stream = 'cooperative'
+                        senders = set(cav.get('simo_senders', []))
+                        counts = own_counts + sum(
+                            other['point_counts'][not_ego]
+                            for other in cavs if other['name'] in senders)
+                    pred_categories = None if result.raw_classes is not None \
+                        else [d.category for d in merged]
+                    for name in ('%s %s' % (cav['name'], stream),
+                                 'all CAVs %s' % stream):
+                        ap_evaluation.add_frame(
+                            name, world_to_cav, result.raw_centres,
+                            result.raw_scores, result.raw_classes,
+                            gt_objects, counts,
+                            pred_categories=pred_categories)
+                    if result.reference is not None:
+                        for name in ('%s single' % cav['name'],
+                                     'all CAVs single'):
+                            ap_evaluation.add_frame(
+                                name, world_to_cav, result.reference[0],
+                                result.reference[1], result.reference[2],
+                                gt_objects, own_counts)
+
                 t2 = time.perf_counter()
-
                 tracks = cav['tracker'].step(merged)
                 t3 = time.perf_counter()
                 # confirmed tracks of this step, consumed by the V2X layer
@@ -879,8 +1023,6 @@ def main():
                                                   in_range, warning, ca_type)
                 t4 = time.perf_counter()
 
-                t_detect = (t1 - t0) * 1000.0
-                t_fuse = (t2 - t1) * 1000.0
                 t_track = (t3 - t2) * 1000.0
                 t_ca = (t4 - t3) * 1000.0
                 cav['timings']['detect'].append(t_detect)
@@ -1007,7 +1149,17 @@ def main():
                              '%.2fm' % np.mean(errs) if errs else 'n/a'))
 
                 # ---- save annotated frames (--save-stride 0 = never) ------
-                if save_stride > 0 and step % save_stride == 0:
+                if save_frames and backend.name != 'yolo':
+                    # no camera boxes to draw on: a bird's-eye view of the
+                    # sweep, the ground truth, the detections and the tracks
+                    cv2.imwrite(os.path.join(
+                        run_dir, cav['name'], 'bev_%05d.png' % step),
+                        render_bev(points, transform_matrix(
+                            rig.lidar.sensor.get_transform()), gt_objects,
+                            own_counts, merged, tracks, ca_results,
+                            title='%s  step %d  t=%.2fs' % (cav['name'],
+                                                            step, t_sim)))
+                if save_frames and backend.name == 'yolo':
                     by_cam = {}
                     for det in merged:
                         by_cam.setdefault(det.camera_idx, []).append(det)
@@ -1051,9 +1203,13 @@ def main():
         # legacy summary remains available for interactive runs, but raw-only
         # runs merely finalize the V2X writers and defer every aggregate.
         v2x_summary = v2x_layer.finalize() if v2x_layer is not None else []
+        ap_lines = []
+        if ap_evaluation is not None:
+            ap_lines = ap_evaluation.write(os.path.join(run_dir, 'ap.json'))
         if not opt.raw_only:
-            lines = ['CA run summary  (YOLOv8-%s per CAV, %d CAVs, %d steps '
-                     '@ %.2fs)' % (capacity, len(cavs), total_steps, dt)]
+            lines = ['CA run summary  (%s per CAV, %d CAVs, %d steps '
+                     '@ %.2fs)' % (backend.label(), len(cavs), total_steps,
+                                   dt)]
             for cav in cavs:
                 total = sum(len(v) for v in cav['errors'].values())
                 lines.append('')
@@ -1093,6 +1249,8 @@ def main():
                         msg += ' | heading RMSE %.1fdeg' % \
                                np.sqrt((hdg ** 2).mean())
                     lines.append(msg)
+            if ap_lines:
+                lines += [''] + ap_lines
             lines += v2x_summary
             summary = '\n'.join(lines)
             print('\n' + summary)
@@ -1136,8 +1294,8 @@ def main():
                 cav['vehicle'].destroy()
             except Exception:
                 pass
-        if scenario_manager is not None:
-            scenario_manager.close()
+        if session is not None:
+            session.close()
         print('Simulation finished.')
 
     # Reaching here means collection, file finalization, and actor cleanup all

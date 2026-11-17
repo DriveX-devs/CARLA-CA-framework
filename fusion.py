@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Camera + LiDAR late fusion for the CA pipeline.
+Camera + LiDAR late fusion for the CA pipeline (YOLOv8 backend).
 
 Strategy (frustum association):
-  1. The LiDAR sweep is transformed to world coordinates once per tick
-     (OpenCDA's sensor_transformation math).
+  1. The LiDAR sweep is transformed to world coordinates once per tick.
   2. For every camera the world points are projected onto the image plane.
   3. For every YOLO box, the projected points falling inside a slightly
      shrunk box are collected and clustered by camera depth; the cluster
@@ -21,8 +20,8 @@ The output feeds the tracker, which derives velocity and heading.
 
 import numpy as np
 
-from opencda.core.sensing.perception.sensor_transformation import (
-    get_camera_intrinsic, world_to_sensor, x_to_world_transformation)
+from carla_utils import (
+    camera_intrinsic_of, transform_matrix, world_to_sensor)
 
 
 # COCO class -> evaluation category. CARLA's bicycles carry a rider, so the
@@ -109,7 +108,7 @@ class CameraLidarFusion(object):
         keep = np.linalg.norm(xyz[:, :2], axis=1) > self.min_ego_dist
         xyz = xyz[keep]
         homog = np.r_[xyz.T, [np.ones(xyz.shape[0])]]
-        lidar_2_world = x_to_world_transformation(lidar_sensor.get_transform())
+        lidar_2_world = transform_matrix(lidar_sensor.get_transform())
         return lidar_2_world @ homog
 
     def project_to_camera(self, world_points, camera_sensor):
@@ -125,7 +124,7 @@ class CameraLidarFusion(object):
         cam = np.array([sensor_points[1],
                         -sensor_points[2],
                         sensor_points[0]])
-        K = get_camera_intrinsic(camera_sensor)
+        K = camera_intrinsic_of(camera_sensor)
         uvw = K @ cam
         depth = uvw[2]
         with np.errstate(divide='ignore', invalid='ignore'):

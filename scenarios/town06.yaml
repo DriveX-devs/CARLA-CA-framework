@@ -1,0 +1,232 @@
+description: |-
+  The CA scenario on Town06 (AdditionalMaps package): 4 CAVs approaching the
+  signalised junction at (658, 144) from its south and west arms, plus background
+  traffic, bikes and pedestrians. Everything but the map-specific values
+  below is ca_convoy.yaml. Start the bridge with the gNB / RSU at the
+  junction:  GNB_X=658 GNB_Y=144 ./run_extended.sh --config scenarios/town06.yaml ...
+
+# ---- carla world -----------------------------------------------------------
+world:
+  sync_mode: true
+  client_port: 2000
+  fixed_delta_seconds: 0.05          # 20 Hz simulation
+  seed: 11
+  weather:
+    sun_altitude_angle: 60           # bright day: good camera visibility
+    cloudiness: 0
+    precipitation: 0
+    precipitation_deposits: 0
+    wind_intensity: 0
+    fog_density: 0
+    fog_distance: 0
+    fog_falloff: 0
+    wetness: 0
+
+# ---- scenario --------------------------------------------------------------
+scenario:
+  # any installed map: Town01..Town07, Town10HD (each also as *_Opt), and with
+  # the AdditionalMaps package Town06, Town07, Town11, Town12, Town13, Town15.
+  # The CAV spawn points, the traffic centre and the gNB / RSU position below
+  # belong to the map: see the scenarios/ directory for other towns.
+  town: Town06_Opt
+  # the static parked vehicles of a layered (*_Opt) map: true keeps them (they
+  # are then ground truth for the detection AP), false unloads that layer
+  parked_vehicles: true
+  duration_seconds: 40
+  warmup_steps: 10                   # ticks before perception starts
+  # each CAV spawns at its own point and drives freely on TM autopilot
+  # (no convoy / trail following):
+  cavs:
+    - name: Cav1
+      spawn_point_index: 127         # south arm, lane 1
+      color: '0, 255, 0'
+    - name: Cav2
+      spawn_point_index: 129         # south arm, lane 3
+      color: '0, 100, 255'
+    - name: Cav3
+      spawn_point_index: 435         # west arm
+      color: '255, 150, 0'
+    - name: Cav4
+      spawn_point_index: 128         # south arm, lane 2
+      color: '200, 0, 200'
+  # with background traffic on the road the CAVs must obey lights,
+  # otherwise cross traffic on green would T-bone them
+  ignore_traffic_lights: false
+  target_speed_perc: 0               # 0 => TM default (30 km/h)
+
+  background_traffic_num: 10         # red autopilot vehicles (TM)
+  bikes:
+    num: 6
+    spawn_near: [658.0, 144.0]       # around the junction
+    spawn_near_radius: 90
+  pedestrians:
+    num: 20
+    spawn_center: [658.0, 144.0]
+    spawn_radius: 90
+    speed: 1.4                       # m/s
+    cross_factor: 0.1                # fraction of walkers allowed to cross
+
+# ---- perception ------------------------------------------------------------
+perception:
+  backend: simo                      # simo | yolo | oracle (--perception)
+
+# SiMO, the base model (simo_perception.py). `package_dir` is the directory
+# holding simo_proto/, configs/ and weights/; relative paths are resolved from
+# this repository, and SIMO_PACKAGE_DIR overrides it.
+simo:
+  package_dir: ../simo_proto
+  config: configs/simo_mm10.yaml
+  weights: weights/simo_mm10_proto_2026-11-11.pth
+  sensors: lidar                     # lidar | camera | both (--simo-sensors)
+  # none: each CAV detects from its own sensors only.
+  # ideal: each CAV also fuses the SiMO messages of the CAVs within
+  #        comm_range_m, handed over in-process (no network, no delay).
+  cooperation: none                  # --simo-cooperation
+  comm_range_m: 80.0
+  single_agent_reference: true       # with ideal: also score each CAV alone
+  # LiDAR history given to the model: the current sweep plus the previous
+  # ones, sweep_interval_s apart (the model was trained with up to 10 sweeps
+  # 0.43 s apart). 1 = the current sweep only.
+  sweeps: 1                          # --simo-sweeps
+  sweep_interval_s: 0.43
+  score_threshold:                   # detections below it never become tracks
+    vehicle: 0.30
+    bike: 0.30
+    pedestrian: 0.30
+  ego_mask_margin: 0.3               # m around the ego box cleared of returns
+  # GPUs of the SiMO models: CAV i runs on devices[i % len(devices)]
+  devices: [cuda:0]                  # --simo-devices cuda:0,cuda:1
+  # The rig the model was trained on (SimBEV2X vehicles): roof LiDAR keeping
+  # 32 of 128 rings between -30.67 and +10.67 degrees, 2048 points per ring,
+  # and six 1600x900 cameras with an 80 degree field of view. The cameras are
+  # spawned only when `sensors` uses them.
+  sensing:
+    lidar:
+      x: 0.0
+      z: 1.8
+      channels: 32
+      range: 120
+      points_per_second: 1310720     # 32 rings x 2048 points x 20 Hz
+      rotation_frequency: 20         # full sweep every sim tick
+      upper_fov: 9.69
+      lower_fov: -30.67
+      dropoff_general_rate: 0.1
+      dropoff_intensity_limit: 0.8
+      dropoff_zero_intensity: 0.4
+      noise_stddev: 0.0
+    camera:
+      image_size_x: 1600
+      image_size_y: 900
+      fov: 80
+      names: [front, front_right, front_left, back, back_right, back_left]
+      positions:                     # relative (x, y, z, yaw)
+        - [ 0.6,  0.0, 1.6,    0]
+        - [ 0.4,  0.4, 1.6,   55]
+        - [ 0.4, -0.4, 1.6,  -55]
+        - [-1.0,  0.0, 1.6,  180]
+        - [ 0.0,  0.4, 1.6,  110]
+        - [ 0.0, -0.4, 1.6, -110]
+
+# oracle backend: ground-truth objects the CAV's LiDAR hits, as detections
+oracle:
+  min_points: 5
+  range_m: 54.4
+
+# ---- sensor rig of the YOLOv8 backend (per CAV) ----------------------------
+sensing:
+  camera:
+    image_size_x: 1920               # Full-HD cameras
+    image_size_y: 1080
+    fov: 100
+    # relative (x, y, z, yaw): the OPV2V 4-camera layout
+    positions:
+      - [2.5,  0.0, 1.0,    0]      # front
+      - [0.0,  0.3, 1.8,  100]      # right
+      - [0.0, -0.3, 1.8, -100]      # left
+      - [-2.0, 0.0, 1.5,  180]      # rear
+  lidar:
+    x: -0.5
+    z: 1.9                           # mount height above vehicle origin
+    channels: 64
+    range: 100
+    points_per_second: 1300000
+    rotation_frequency: 20           # full sweep every sim tick
+    upper_fov: 2
+    lower_fov: -25
+    dropoff_general_rate: 0.1
+    dropoff_intensity_limit: 0.7
+    dropoff_zero_intensity: 0.2
+    noise_stddev: 0.01
+
+# ---- YOLOv8 detection + camera/LiDAR fusion (yolo backend only) ------------
+detection:
+  model_capacity: n                  # n | m | x  (yolov8<capacity>.pt)
+  weights_dir: models
+  confidence: 0.40
+  # COCO ids: 0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
+  classes: [0, 1, 2, 3, 5, 7]
+
+fusion:
+  bbox_shrink: 0.12                  # shrink boxes 12 % per side before picking lidar pts
+  depth_gap: 1.8                     # split depth clusters at gaps > this (m)
+  min_ego_dist: 2.8                  # drop lidar returns on the ego body (m)
+  # per-category parameters (category = vehicle | bike | pedestrian)
+  min_points:                        # min lidar points to accept a detection
+    vehicle: 5
+    bike: 4
+    pedestrian: 4
+  center_offset:                     # surface-centroid -> object-center push (m)
+    vehicle: 1.3
+    bike: 0.5
+    pedestrian: 0.3
+  merge_dist:                        # cross-camera merge radius in world frame (m)
+    vehicle: 2.5
+    bike: 1.5
+    pedestrian: 1.0
+
+# ---- collision avoidance (PyCA, PyCA/t2c.py) -------------------------------
+# Every step, each CAV runs the t2c/s2c check between its own TRUE state
+# (position/velocity/acceleration from the simulator: a real vehicle knows
+# its own kinematics) and every confirmed track (fused position + Kalman
+# velocity, constant-velocity assumption). Raw t2c/s2c go to metrics.csv and
+# the frame infographic; the thresholds below only gate the ca_warning flag.
+# t2c_th is fixed by default (run_ca_extended.py --fixed-t2c-threshold, matching
+# the edge); pass --no-fixed-t2c-threshold to restore speed-scaling above 50 km/h.
+collision:
+  t2c_th: 4.8                        # time-to-collision threshold (s)
+  s2c_th: 4.2                        # space-to-collision threshold (m)
+  alpha_th_deg: 17.0                 # heading diff below this = rear-end pair
+  check_rear_end: false              # experiment scope: cross-road only
+  stale_after_s: 0.5                  # fixed edge-state TTL (500 ms)
+  # warning_cooldown: edge-only per-pair warning dedup [s]. The campaign runs
+  # with it disabled (--no-warning-cooldown) so edge warnings are per-frame like
+  # the on-board/GT streams; historical default was 2.0 s.
+
+tracking:
+  gate_dist:                         # association gate (m); tight for
+    vehicle: 3.0                     # pedestrians to avoid identity swaps
+    bike: 2.5                        # in groups
+    pedestrian: 1.5
+  accel_noise: 3.5                   # Kalman process noise (m/s^2)
+  meas_noise: 0.30                   # Kalman measurement noise (m)
+  confirm_hits: 3
+  max_misses: 10
+  min_speed_for_heading: 1.0         # below this, hold last heading (m/s)
+
+# ---- evaluation / output ---------------------------------------------------
+output:
+  root: output
+  save_stride: 20                    # save annotated frames every N steps
+  print_stride: 20                   # console status every N steps
+  eval_match_dist:                   # max distance to match a track to a GT object
+    vehicle: 4.0
+    bike: 2.5
+    pedestrian: 2.0
+
+# detection AP against CARLA ground truth (ap_eval.py), written to ap.json
+evaluation:
+  ap: true
+  ap_stride: 2                       # score every N-th step
+  ap_skip_seconds: 0.0               # leave out the first seconds of a run
+  eval_range_m: 54.4                 # the model's range around the receiver
+  min_lidar_points: 1                # LiDAR returns for an object to count

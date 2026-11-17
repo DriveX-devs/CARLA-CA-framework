@@ -8,27 +8,32 @@
 # truth. Nothing is analysed or plotted here: this script only collects raw
 # data and validates its structure.
 #
-#   ./CA/run_campaign.sh                                  # 1 seed, 3 policies, n/m/x
-#   ./CA/run_campaign.sh --runs 10 --seconds 80           # 10 seeds x 9 cells
-#   ./CA/run_campaign.sh --policies "1" --models "n"      # smallest useful campaign
-#   ./CA/run_campaign.sh --config CA/ca_convoy_t2c3_s2c3.yaml   # tighter CA thresholds
-#   ./CA/run_campaign.sh --policies "3" --loss "0 10 30 50 90"  # packet-loss sweep
-#   ./CA/run_campaign.sh --out CA/output/mycampaign --attach --policies "4"
-#   ./CA/run_campaign.sh --dry-run                        # print the commands only
+#   ./run_campaign.sh                                  # 1 seed, 3 policies, SiMO
+#   ./run_campaign.sh --runs 10 --seconds 80           # 10 seeds x 3 cells
+#   ./run_campaign.sh --policies "1"                   # smallest useful campaign
+#   ./run_campaign.sh --config my_scenario.yaml   # tighter CA thresholds
+#   ./run_campaign.sh --policies "3" --loss "0 10 30 50 90"  # packet-loss sweep
+#   ./run_campaign.sh --out output/mycampaign --attach --policies "4"
+#   ./run_campaign.sh --dry-run                        # print the commands only
 #
 # Options (each has an environment-variable equivalent):
 #
 #   --out DIR           campaign root directory              OUT_DIR
-#                       (default CA/output/campaign_<timestamp>)
+#                       (default output/campaign_<timestamp>)
 #   --runs N            number of seeds                      NUM_RUNS         (1)
 #   --base-seed N       first seed; run k uses BASE_SEED+k-1 BASE_SEED        (11)
 #   --seconds N         duration of one cell                 RUN_DURATION_S   (80)
 #   --policies "1 2 3"  app modes to collect, see below      APP_MODES        (1 2 3)
-#   --models "n m x"    YOLOv8 capacities                    MODELS           (n m x)
+#   --models "simo"     perception per cell                  MODELS           (simo)
+#                       simo = SiMO, each CAV on its own sensors;
+#                       simo-coop = SiMO with ideal cooperation;
+#                       n | m | x = YOLOv8 capacity; oracle = ground truth
+#   --access A          uu | 11p | 11bd | nrv2x              ACCESS           (uu)
+#   --topology T        rsu | hybrid (when access is not uu) TOPOLOGY         (rsu)
 #   --config PATH       scenario yaml passed to the app      CA_CONFIG        (the app default)
 #   --loss "0 10 50"    injected packet-loss levels [%];     LOSS_PERCENTAGES (none)
 #                       when given, cells are nested under loss_<pp>/ and the
-#                       bridge is driven through CA/run_extended_pl.sh
+#                       bridge is driven through run_extended_pl.sh
 #   --save-stride N     annotated camera frames every N      SAVE_STRIDE      (0)
 #                       steps; 0 = none. Frames are ~97 % of a cell's size and
 #                       no metric reads them.
@@ -41,34 +46,27 @@
 #   --dry-run           print the per-cell commands and exit
 #
 # Policies (--policies takes app modes; the cell directory name is fixed by
-# CA/validate_campaign_raw.py):
+# validate_campaign_raw.py):
 #
 #   1  policy_0_onboard        on-board CA only, no V2X
 #   2  policy_1_collaborative  detections uploaded to the edge over 5G
 #   3  policy_2_vam            as 2, plus VRUs broadcasting VAMs
 #   4  policy_3_vam_only       edge CA fed by VAMs and CAV ego states only
 #
-# App modes >= 2 need the ns-3 v2x-bridge; it is built and probed automatically.
+# App modes >= 2 need the ns-3 drivex-bridge; it is built and probed automatically.
 # A campaign with app mode 1 alone needs no ns-3 at all.
 #
 # Completed cells are resumable: a cell holding _SUCCESS is re-validated, not
 # re-run. Interrupted cells are moved under <run>/_failed/ before a retry.
 #
-# Per-machine paths (CARLA, ns-3, conda) come from CA/env.sh — see env.example.sh.
+# Per-machine paths (CARLA, ns-3, conda) come from env.sh — see env.example.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPEN_CDA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKSPACE_ROOT="$(cd "$OPEN_CDA_ROOT/.." && pwd)"
-
-# Per-machine configuration (CARLA / ns-3 / conda paths). env.sh is gitignored:
-# copy env.example.sh to env.sh and edit it once per machine.
-[ -f "$SCRIPT_DIR/env.sh" ] && . "$SCRIPT_DIR/env.sh"
-
-NS3_ROOT=${NS3_ROOT:-$WORKSPACE_ROOT/ns-3-dev}
-NS3_BUILD_DIR=${NS3_BUILD_DIR:-$NS3_ROOT/build-campaign}
-NS3_CMAKE_DIR=${NS3_CMAKE_DIR:-$NS3_ROOT/cmake-cache-campaign}
-NS3_BRIDGE_DIR=${NS3_BRIDGE_DIR:-v2x-bridge}
+# Paths, per-machine configuration (env.sh) and the CARLA / bridge helpers.
+. "$SCRIPT_DIR/launch_lib.sh"
+OPEN_CDA_ROOT="$CA_ROOT"       # the directory every relative path starts from
+export ACCESS TOPOLOGY
 CAMPAIGN_CARLA_PORT=${CAMPAIGN_CARLA_PORT:-2100}
 CAMPAIGN_BRIDGE_PORT=${CAMPAIGN_BRIDGE_PORT:-5555}
 
@@ -77,7 +75,7 @@ NUM_RUNS=${NUM_RUNS:-1}
 BASE_SEED=${BASE_SEED:-11}
 RUN_DURATION_S=${RUN_DURATION_S:-80}
 APP_MODES=${APP_MODES:-"1 2 3"}
-MODELS=${MODELS:-"n m x"}
+MODELS=${MODELS:-"simo"}
 CA_CONFIG=${CA_CONFIG:-}
 LOSS_PERCENTAGES=${LOSS_PERCENTAGES:-}
 SAVE_STRIDE=${SAVE_STRIDE:-0}
@@ -102,6 +100,8 @@ while [ "$#" -gt 0 ]; do
         --seconds)      [ "$#" -ge 2 ] || { usage; exit 2; }; RUN_DURATION_S=$2; shift 2 ;;
         --policies)     [ "$#" -ge 2 ] || { usage; exit 2; }; APP_MODES=$2; shift 2 ;;
         --models)       [ "$#" -ge 2 ] || { usage; exit 2; }; MODELS=$2; shift 2 ;;
+        --access)       [ "$#" -ge 2 ] || { usage; exit 2; }; ACCESS=$2; shift 2 ;;
+        --topology)     [ "$#" -ge 2 ] || { usage; exit 2; }; TOPOLOGY=$2; shift 2 ;;
         --config)       [ "$#" -ge 2 ] || { usage; exit 2; }; CA_CONFIG=$2; shift 2 ;;
         --loss)         [ "$#" -ge 2 ] || { usage; exit 2; }; LOSS_PERCENTAGES=$2; shift 2 ;;
         --save-stride)  [ "$#" -ge 2 ] || { usage; exit 2; }; SAVE_STRIDE=$2; shift 2 ;;
@@ -118,7 +118,7 @@ done
 EXPECTED_STEPS=$((RUN_DURATION_S * STEPS_PER_S))
 SMOKE_STEPS=$((SMOKE_DURATION_S * STEPS_PER_S))
 
-# ---- policy naming (must match CA/validate_campaign_raw.py) -----------------
+# ---- policy naming (must match validate_campaign_raw.py) -----------------
 policy_dir_for() {
     case "$1" in
         1) echo policy_0_onboard ;;
@@ -137,12 +137,23 @@ for mode in $APP_MODES; do
     [ "$mode" -ge 2 ] && NEEDS_NS3=1
 done
 [ -n "$POLICY_INDICES" ] || { echo "ERROR: --policies is empty" >&2; exit 2; }
-for model in $MODELS; do
-    case "$model" in
-        n|m|x) ;;
-        *) echo "ERROR: unknown model capacity '$model' (expected n, m or x)" >&2; exit 2 ;;
+# The application arguments that select the perception of a cell.
+model_args() {
+    case "$1" in
+        simo)      echo "--perception simo --simo-cooperation none" ;;
+        simo-coop) echo "--perception simo --simo-cooperation ideal" ;;
+        n|m|x)     echo "--perception yolo --model $1" ;;
+        oracle)    echo "--perception oracle" ;;
+        *) echo "ERROR: unknown model '$1' (expected simo, simo-coop, n, m, x or oracle)" >&2
+           return 1 ;;
     esac
+}
+for model in $MODELS; do
+    model_args "$model" >/dev/null || exit 2
 done
+bridge_access_args >/dev/null || exit 2
+# the short sanity cells run with the first model of the campaign
+SMOKE_MODEL=${MODELS%% *}
 MODEL_LIST=$(echo $MODELS | tr ' ' ',')
 
 # ---- output directory ------------------------------------------------------
@@ -151,7 +162,7 @@ if [ -z "$OUT_DIR" ]; then
         echo "ERROR: --attach needs --out pointing at the campaign to extend" >&2
         exit 2
     fi
-    OUT_DIR="$OPEN_CDA_ROOT/CA/output/campaign_$(date +%Y%m%d_%H%M%S)"
+    OUT_DIR="$OPEN_CDA_ROOT/output/campaign_$(date +%Y%m%d_%H%M%S)"
 elif [[ "$OUT_DIR" != /* ]]; then
     OUT_DIR="$OPEN_CDA_ROOT/$OUT_DIR"
 fi
@@ -162,10 +173,10 @@ MANIFEST_DIR="$OUT_DIR/manifests"
 # is injected; "none" selects run_extended.sh instead of run_extended_pl.sh.
 if [ -n "$LOSS_PERCENTAGES" ]; then
     LOSS_ITER="$LOSS_PERCENTAGES"
-    LAUNCHER=./CA/run_extended_pl.sh
+    LAUNCHER=./run_extended_pl.sh
 else
     LOSS_ITER="none"
-    LAUNCHER=./CA/run_extended.sh
+    LAUNCHER=./run_extended.sh
 fi
 
 run_root_for() {   # run index, seed, loss token
@@ -223,7 +234,7 @@ if [ "$DRY_RUN" = "1" ]; then
                    # manifest, extra args
         echo "$1ANALYZE=0 MANAGE_CARLA=1 CARLA_PORT=$CAMPAIGN_CARLA_PORT" \
              "NS3_ROOT=$NS3_ROOT NS3_BUILD_DIR=$NS3_BUILD_DIR NS3_CMAKE_DIR=$NS3_CMAKE_DIR" \
-             "$LAUNCHER ${COMMON_ARGS[*]} --app-mode $2 --model $3" \
+             "$LAUNCHER ${COMMON_ARGS[*]} --app-mode $2 $(model_args "$3")" \
              "--seconds $4 --seed $5 --run-dir $6 --traffic-manifest $7${8:+ $8}"
     }
     SEEN_SEEDS=" "
@@ -234,13 +245,13 @@ if [ "$DRY_RUN" = "1" ]; then
         [ "$token" != "none" ] && loss_env="INJECTED_LOSS_PERC=$token BRIDGE_RNG_RUN=$seed "
         if [ "$ATTACH" != "1" ] && [[ "$SEEN_SEEDS" != *" $seed "* ]]; then
             SEEN_SEEDS="$SEEN_SEEDS$seed "
-            dry_cell "" 1 n "$SMOKE_DURATION_S" "$seed" \
+            dry_cell "" 1 "$SMOKE_MODEL" "$SMOKE_DURATION_S" "$seed" \
                 "$OUT_DIR/_manifest_smoke/seed$seed/mode_1" "$manifest" \
                 "--create-traffic-manifest"
         fi
         if [ "$SMOKE" = "1" ]; then
             for mode in $APP_MODES; do
-                dry_cell "$loss_env" "$mode" n "$SMOKE_DURATION_S" "$seed" \
+                dry_cell "$loss_env" "$mode" "$SMOKE_MODEL" "$SMOKE_DURATION_S" "$seed" \
                     "$run_root/_smoke/mode_$mode" "$manifest" ""
             done
         fi
@@ -255,8 +266,7 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "${CA_CONDA_ENV:-msvan3t_carla}"
+ca_activate_env
 cd "$OPEN_CDA_ROOT"
 unset MAXUES || true
 
@@ -268,6 +278,7 @@ echo "Runs               : ${#RUN_SPECS[@]} cell groups"\
      "($([ "$ATTACH" = 1 ] && echo "attached to the existing runs" || echo "seeds $BASE_SEED..$((BASE_SEED + NUM_RUNS - 1))"))"
 echo "Duration           : ${RUN_DURATION_S}s (${EXPECTED_STEPS} steps at ${FIXED_DELTA_S}s)"
 echo "Policies           : $APP_MODES   models: $MODELS   save-stride: $SAVE_STRIDE"
+[ "$NEEDS_NS3" = "1" ] && echo "Network            : access $ACCESS$([ "$ACCESS" != uu ] && echo ", topology $TOPOLOGY")"
 [ -n "$CA_CONFIG" ] && echo "Config             : $CA_CONFIG"
 [ "$LOSS_ITER" != "none" ] && echo "Injected loss [%]  : $LOSS_PERCENTAGES (bridge --RngRun = seed)"
 
@@ -286,7 +297,7 @@ free_gb() { echo $(( $(free_kb "$1") / 1024 / 1024 )); }
 kill_campaign_processes() {
     pkill -f "run_ca_extended\.py.*${OUT_DIR}" 2>/dev/null || true
     pkill -f "run_extended.*\.sh.*${OUT_DIR}" 2>/dev/null || true
-    pkill -f "v2x-bridge-default.*${OUT_DIR}" 2>/dev/null || true
+    pkill -f "drivex-bridge-.*${OUT_DIR}" 2>/dev/null || true
     pkill -f "carla-rpc-port=${CAMPAIGN_CARLA_PORT}" 2>/dev/null || true
 }
 
@@ -335,27 +346,15 @@ trap on_exit EXIT
 trap 'exit 143' TERM INT
 start_watchdog
 
-# ---- ns-3 v2x-bridge -------------------------------------------------------
+# ---- ns-3 drivex-bridge ----------------------------------------------------
 BRIDGE_BIN=""
 build_bridge() {
-    echo "Building the workspace v2x-bridge..."
-    if [ ! -f "$NS3_CMAKE_DIR/CMakeCache.txt" ] || \
-            ! grep -Fqx "CMAKE_HOME_DIRECTORY:INTERNAL=$NS3_ROOT" \
-                "$NS3_CMAKE_DIR/CMakeCache.txt" || \
-            ! grep -Fqx "NS3_OUTPUT_DIRECTORY:STRING=$NS3_BUILD_DIR" \
-                "$NS3_CMAKE_DIR/CMakeCache.txt"; then
-        cmake -S "$NS3_ROOT" -B "$NS3_CMAKE_DIR" -G Ninja \
-            -DCMAKE_BUILD_TYPE=default \
-            -DNS3_EXAMPLES=OFF -DNS3_TESTS=OFF \
-            -DNS3_OUTPUT_DIRECTORY="$NS3_BUILD_DIR"
-    fi
-    cmake --build "$NS3_CMAKE_DIR" \
-        --target "scratch_${NS3_BRIDGE_DIR}_v2x-bridge" -j "${NS3_BUILD_JOBS:-4}"
-    BRIDGE_BIN=$(find "$NS3_BUILD_DIR/scratch/$NS3_BRIDGE_DIR" -maxdepth 1 \
-        -type f -name 'ns3.*-v2x-bridge-default' -print | sort | head -1)
+    echo "Building the drivex-bridge..."
+    bridge_build
+    BRIDGE_BIN=$(bridge_binary)
     if [ -z "$BRIDGE_BIN" ] || \
-            [ "$NS3_ROOT/scratch/$NS3_BRIDGE_DIR/v2x-bridge.cc" -nt "$BRIDGE_BIN" ]; then
-        echo "ERROR: workspace v2x-bridge is missing or stale after build" >&2
+            [ "$NS3_ROOT/scratch/$NS3_BRIDGE_DIR/drivex-bridge.cc" -nt "$BRIDGE_BIN" ]; then
+        echo "ERROR: the drivex-bridge is missing or stale after build" >&2
         exit 1
     fi
 }
@@ -370,8 +369,10 @@ probe_bridge() {   # injected loss %, expected status ("delivered" / "lost")
         return 1
     fi
     probe_dir=$(mktemp -d)
+    # shellcheck disable=SC2046
     LD_LIBRARY_PATH="$NS3_BUILD_DIR/lib" setsid "$BRIDGE_BIN" \
-        --maxUes=2 --listenPort="$probe_port" \
+        --maxUes=2 --listenPort="$probe_port" --gnbX=-42 --gnbY=25 \
+        $(bridge_access_args) \
         --injected-loss-perc="$1" --RngRun=1 \
         --csvSend="$probe_dir/send.csv" --csvRecv="$probe_dir/recv.csv" \
         >"$probe_dir/bridge.log" 2>&1 </dev/null &
@@ -399,7 +400,7 @@ payload = b"campaign-payload-probe"
 entities = [
     {"timestamp": 0.0, "origin_ID": "Cav1",
      "origin_vehicle_type": "cav",
-     "Position": {"x_m": -42, "y_m": 25, "z_m": 1.5},
+     "Position": {"x_m": -32, "y_m": 25, "z_m": 1.5},
      "Velocity": 0, "Heading": 0},
     {"timestamp": 0.0, "origin_ID": "BS",
      "origin_vehicle_type": "base_station",
@@ -426,7 +427,8 @@ if expect == "delivered":
     if base64.b64decode(reply["payload"]) != payload:
         raise SystemExit("bridge payload probe returned different bytes")
 sock.sendto(b'{"msg_type":"shutdown"}', ("127.0.0.1", port))
-print("v2x-bridge probe passed (expected status %s)" % expect)
+print("drivex-bridge probe passed (expected status %s, link %s)"
+      % (expect, reply.get("link")))
 PY
     wait "$probe_pid"
     rm -r -- "$probe_dir"
@@ -441,8 +443,8 @@ else
 fi
 
 # ---- cell execution --------------------------------------------------------
-# CARLA 0.9.12 segfaults now and then, after which the client blocks on 60 s
-# per-actor timeouts. A crashed cell is retried rather than aborting the run.
+# A CARLA server can segfault, after which the client blocks on its time-outs.
+# A crashed cell is retried rather than aborting the run.
 retry_cleanup() {
     kill_campaign_processes
     local i
@@ -476,7 +478,7 @@ run_cell() {
 
     if [ -f "$run_dir/_SUCCESS" ]; then
         echo "Validating and skipping completed cell: $run_dir"
-        python CA/validate_campaign_raw.py run "$run_dir" \
+        python validate_campaign_raw.py run "$run_dir" \
             --app-mode "$app_mode" --steps "$expected_steps"
         return 0
     fi
@@ -503,10 +505,10 @@ run_cell() {
                 NS3_ROOT="$NS3_ROOT" NS3_BUILD_DIR="$NS3_BUILD_DIR" \
                 NS3_CMAKE_DIR="$NS3_CMAKE_DIR" NS3_BRIDGE_DIR="$NS3_BRIDGE_DIR" \
                 "$LAUNCHER" \
-                --app-mode "$app_mode" --model "$model" \
+                --app-mode "$app_mode" $(model_args "$model") \
                 --seconds "$duration" --seed "$seed" \
                 --run-dir "$run_dir" "${cell_args[@]}" && \
-           python CA/validate_campaign_raw.py run "$run_dir" \
+           python validate_campaign_raw.py run "$run_dir" \
                 --app-mode "$app_mode" --steps "$expected_steps"; then
             return 0
         fi
@@ -537,7 +539,7 @@ ensure_manifest() {   # seed, manifest path
         exit 1
     fi
     echo "---- Creating the shared traffic manifest for seed $1 ----"
-    run_cell 1 n "$SMOKE_DURATION_S" "$SMOKE_STEPS" \
+    run_cell 1 "$SMOKE_MODEL" "$SMOKE_DURATION_S" "$SMOKE_STEPS" \
         "$OUT_DIR/_manifest_smoke/seed$1/mode_1" 1 none "$1" "$2" "$OUT_DIR"
     if [ ! -f "$2" ]; then
         echo "ERROR: the traffic manifest was not created: $2" >&2
@@ -570,7 +572,7 @@ value = {
     "seed": int(os.environ["SEED_VALUE"]),
     "models": os.environ["MODELS_VALUE"].split(),
     "policies": {str(mode - 1): names[mode] for mode in modes},
-    "config": os.environ["CONFIG_VALUE"] or "CA/ca_convoy.yaml",
+    "config": os.environ["CONFIG_VALUE"] or "ca_convoy.yaml",
     "save_stride": int(os.environ["SAVE_STRIDE_VALUE"]),
     "injected_loss_perc": None if loss == "none" else int(loss),
     "ns3_root": os.environ["NS3_ROOT_VALUE"],
@@ -601,7 +603,7 @@ for spec in "${RUN_SPECS[@]}"; do
 
     if [ "$SMOKE" = "1" ]; then
         for mode in $APP_MODES; do
-            run_cell "$mode" n "$SMOKE_DURATION_S" "$SMOKE_STEPS" \
+            run_cell "$mode" "$SMOKE_MODEL" "$SMOKE_DURATION_S" "$SMOKE_STEPS" \
                 "$RUN_ROOT/_smoke/mode_$mode" 0 "$TOKEN" "$SEED" \
                 "$MANIFEST" "$RUN_ROOT"
         done
@@ -616,7 +618,7 @@ for spec in "${RUN_SPECS[@]}"; do
         done
     done
 
-    python CA/validate_campaign_raw.py campaign "$RUN_ROOT" \
+    python validate_campaign_raw.py campaign "$RUN_ROOT" \
         --steps "$EXPECTED_STEPS" --policies "$POLICY_INDICES" \
         --models "$MODEL_LIST"
     echo "Raw-data run complete: $RUN_ROOT"

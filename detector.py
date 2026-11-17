@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-YOLOv8 vehicle detector for the CA pipeline.
+YOLOv8 detector for the CA pipeline: the optional `yolo` perception backend
+(SiMO is the default one, see simo_perception.py).
 
-Uses ultralytics YOLOv8 with selectable capacity (n / m / x). This is the
-most recent YOLO family installable in the msvan3t_carla env (Python 3.7
-caps ultralytics at 8.0.x; YOLO11 needs Python >= 3.8). Every CAV
+Uses ultralytics YOLOv8 with selectable capacity (n / m / x). Every CAV
 instantiates its OWN detector (one YOLO model per CAV); the 4 camera images
 of one CAV at one simulation step are run as a single batch.
 """

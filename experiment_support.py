@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Deterministic traffic manifests for CA comparison campaigns.
 
-CARLA 0.9.12 cannot seed navigation-mesh sampling for pedestrians.  A
-campaign therefore samples the traffic layout once, records every actor and
-walker destination, and strictly replays that manifest in subsequent runs.
+A campaign samples the traffic layout once, records every actor and walker
+destination, and strictly replays that manifest in subsequent runs, so that
+every policy of a seed is compared on the same traffic.
 """
 
 import json
@@ -13,8 +13,8 @@ import random
 
 import carla
 
-from CA.traffic_spawners import (
-    _BIKE_BLUEPRINTS, _red_background_blueprints)
+from traffic_spawners import (
+    _BIKE_BLUEPRINTS, _red_background_blueprints, make_walkers_sensable)
 
 
 MANIFEST_VERSION = 1
@@ -266,6 +266,8 @@ def spawn_manifest_traffic(world, client, tm, tm_port, n_background,
             controller.start()
             controller.go_to_location(_location(entry["target"]))
             controller.set_max_speed(float(entry["speed"]))
+        if make_walkers_sensable(world, walkers) != len(walkers):
+            raise RuntimeError("a replayed pedestrian has no valid position")
         if create_manifest:
             _write_json_atomic(manifest_path, manifest)
         print("Replayed deterministic traffic manifest: %d vehicles, %d "

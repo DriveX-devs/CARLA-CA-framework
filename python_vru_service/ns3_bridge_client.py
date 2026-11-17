@@ -1,13 +1,22 @@
 #
 # ns3_bridge_client.py
 #
-# UDP client for the ns-3 "v2x-bridge" co-simulation program
-# (ns-3-dev/scratch/v2x-bridge): it sends the JSON control datagrams that
-# drive the simulated 5G NR network (scene/entity updates + one simulated
-# packet per datagram) and collects the JSON replies (delivery confirmations,
-# with the application payload as received at the destination node).
+# UDP client for the ns-3 "drivex-bridge" co-simulation program
+# (scratch/drivex-bridge of the ns-3 tree with the DriveX modules): it sends
+# the JSON control datagrams that drive the simulated network (scene/entity
+# updates + one simulated packet per datagram) and collects the JSON replies
+# (delivery confirmations, with the application payload as received at the
+# destination node). The radio that carries a packet (NR Uu, IEEE 802.11p,
+# IEEE 802.11bd, the NR-V2X sidelink) is the bridge's business: every reply
+# says which link it took.
 #
-# Protocol rules implemented here (see the v2x-bridge README):
+# The bridge also originates traffic of its own: with --vbs, DriveX's VRU
+# Basic Service runs inside ns-3 on every vulnerable road user this client
+# reports, and its VAMs (and GeoNetworking beacons) travel to "BS". They are
+# reported here through on_vam_tx (a VAM was generated) and on_bridge_packet
+# (a VAM or a beacon reached the edge, or was lost).
+#
+# Protocol rules implemented here (see the drivex-bridge DOCS.md):
 #   - one packet per datagram, each with a unique integer packet_id;
 #   - request_reply is always true: every simulated packet produces a reply
 #     (delivered / timeout / error) that is matched back via packet_id;
@@ -48,19 +57,59 @@ class Ns3BridgeClient:
         self.stats = {"sent": 0, "delivered": 0, "timeout": 0, "error": 0,
                       "expired": 0}
         self.latencies_ms = {}       # kind -> list of delivered latencies
+        self.links = {}              # kind -> {link: delivered packets}
+        # traffic the bridge originates (the VAMs and beacons of --vbs)
+        self.on_vam_tx = None        # callback(message dict)
+        self.on_bridge_packet = None # callback(reply dict, payload bytes)
+        self.bridge_stats = {}       # type -> {status: packets}
+        self._barrier_id = 0
+        self._barrier_acked = 0
 
     # ------------------------------------------------------------------
     def _send_json(self, message):
         self.sock.sendto(json.dumps(message).encode(), self.addr)
 
-    def send_entities(self, timestamp, entities):
+    def send_entities(self, timestamp, entities, extra=None):
         """Scene-only datagram: refresh the position of the given entities
-        (list of dicts in the bridge schema) at the given simulation time."""
+        (list of dicts in the bridge schema) at the given simulation time.
+        extra: further top-level fields, e.g. {"edge_geo": {...}}."""
         if not entities:
             return
-        self._send_json({"msg_type": "control",
-                         "timestamp": round(float(timestamp), 6),
-                         "entities": entities})
+        message = {"msg_type": "control",
+                   "timestamp": round(float(timestamp), 6),
+                   "entities": entities}
+        if extra:
+            message.update(extra)
+        self._send_json(message)
+
+    def send_vbs_control(self, timestamp, origin_id, t_gen_vam_ms,
+                         duration_ms=None):
+        """Set the longest time between two VAMs of one road user's VRU Basic
+        Service (100-5000 ms), for duration_ms or until changed again: how an
+        application asks a vulnerable road user for more VAMs."""
+        message = {"msg_type": "vbs_control",
+                   "timestamp": round(float(timestamp), 6),
+                   "origin_ID": str(origin_id),
+                   "t_gen_vam_ms": int(t_gen_vam_ms)}
+        if duration_ms is not None:
+            message["duration_ms"] = int(duration_ms)
+        self._send_json(message)
+
+    def barrier(self, max_wait_s=30.0):
+        """Wait until the bridge has run every command sent so far and the
+        drain window after them. Returns False on timeout."""
+        self._barrier_id += 1
+        self._send_json({"msg_type": "barrier", "id": self._barrier_id})
+        deadline = time.monotonic() + max_wait_s
+        while self._barrier_acked < self._barrier_id:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            readable, _, _ = select.select([self.sock], [], [],
+                                           min(0.005, remaining))
+            if readable:
+                self._drain()
+        return True
 
     def send_packet(self, timestamp, sender, receiver, ptype, payload=b"",
                     entities=None, size_bytes=None, kind=None, meta=None,
@@ -108,10 +157,29 @@ class Ns3BridgeClient:
         packet_id = reply.get("packet_id")
         pending = self._pending.pop(packet_id, None)
         if pending is None:
+            # not one of ours: a packet the bridge originated
+            if reply.get("type") in ("vam", "beacon"):
+                counts = self.bridge_stats.setdefault(reply["type"], {})
+                status = reply.get("status", "?")
+                counts[status] = counts.get(status, 0) + 1
+                if status == "delivered" and \
+                        reply.get("latency_ms") is not None:
+                    self.latencies_ms.setdefault(reply["type"], []).append(
+                        float(reply["latency_ms"]))
+                    by_link = self.links.setdefault(reply["type"], {})
+                    link = reply.get("link", "?")
+                    by_link[link] = by_link.get(link, 0) + 1
+                if self.on_bridge_packet is not None:
+                    payload = base64.b64decode(reply["payload"]) \
+                        if "payload" in reply else b""
+                    self.on_bridge_packet(reply, payload)
             return
         status = reply.get("status")
         if status == "delivered":
             self.stats["delivered"] += 1
+            by_link = self.links.setdefault(pending["kind"], {})
+            link = reply.get("link", "?")
+            by_link[link] = by_link.get(link, 0) + 1
             if reply.get("latency_ms") is not None:
                 self.latencies_ms.setdefault(pending["kind"], []).append(
                     float(reply["latency_ms"]))
@@ -154,10 +222,17 @@ class Ns3BridgeClient:
             except ValueError:
                 print("[NS3] malformed reply datagram discarded")
                 continue
-            if reply.get("msg_type") == "reply":
+            kind = reply.get("msg_type")
+            if kind == "reply":
                 self._dispatch(reply)
                 dispatched += 1
-            elif reply.get("msg_type") == "shutdown_ack":
+            elif kind == "vam_tx":
+                if self.on_vam_tx is not None:
+                    self.on_vam_tx(reply)
+            elif kind == "barrier_ack":
+                self._barrier_acked = max(self._barrier_acked,
+                                          int(reply.get("id", 0)))
+            elif kind in ("shutdown_ack", "vbs_control_ack"):
                 pass
             else:
                 print("[NS3] unexpected message discarded: %s"
@@ -179,7 +254,7 @@ class Ns3BridgeClient:
         if stale and not self._dead_warned:
             self._dead_warned = True
             print("[NS3] WARNING: %d packet(s) got no reply within %.1f s - "
-                  "is the v2x-bridge running on udp://%s:%d?"
+                  "is the drivex-bridge running on udp://%s:%d?"
                   % (len(stale), self._pending_expiry_wall_s,
                      self.addr[0], self.addr[1]))
 
@@ -216,10 +291,18 @@ class Ns3BridgeClient:
                  % (self.stats["sent"], self.stats["delivered"],
                     self.stats["timeout"], self.stats["error"],
                     self.stats["expired"])]
+        for ptype in sorted(self.bridge_stats):
+            counts = self.bridge_stats[ptype]
+            lines.append("  generated in ns-3, %-6s: %s"
+                         % (ptype, ", ".join("%d %s" % (counts[k], k)
+                                             for k in sorted(counts))))
         for kind in sorted(self.latencies_ms):
             lat = self.latencies_ms[kind]
+            links = self.links.get(kind, {})
             lines.append("  %-10s: %d delivered, latency mean %.2f ms "
-                         "(min %.2f, max %.2f)"
+                         "(min %.2f, max %.2f), link %s"
                          % (kind, len(lat), sum(lat) / len(lat),
-                            min(lat), max(lat)))
+                            min(lat), max(lat),
+                            ", ".join("%s x%d" % (k, links[k])
+                                      for k in sorted(links)) or "?"))
         return lines

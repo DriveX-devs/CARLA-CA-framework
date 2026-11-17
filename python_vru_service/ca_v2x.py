@@ -1,28 +1,34 @@
 #
-# opencda_v2x.py
+# ca_v2x.py
 #
-# In-process V2X layer for the OpenCDA CA application (OpenCDA/CA), gluing
-# together:
+# In-process V2X layer of the CA application, gluing together:
 #
 #   - the per-CAV local LDM (ldm.py), fed with the confirmed tracks of the CA
-#     perception pipeline (YOLOv8 + camera/LiDAR fusion + Kalman tracking);
-#   - the per-VRU VRU Basic Service (vru_basic_service.py), transmitting
-#     UPER-encoded VAMs on the ETSI TS 103 300-3 triggering conditions,
-#     stepped on the CARLA/OpenCDA simulation clock;
+#     perception pipeline (SiMO, or YOLOv8 + camera/LiDAR fusion, + Kalman
+#     tracking);
+#   - the VRU Basic Service of the connected VRUs. It is DriveX's, and it runs
+#     inside ns-3 (drivex-bridge --vbs): this layer only tells the bridge
+#     where each VRU is at every tick, as it does for the radio geometry, and
+#     the service there decides when a VAM is due (ETSI TS 103 300-3
+#     triggering conditions), encodes it and sends it through GeoNetworking
+#     and the simulated network to the edge, where DriveX's stack decodes it.
+#     What reaches this layer is the outcome: one message per generated VAM
+#     and one per VAM delivered to (or lost on the way to) the edge;
 #   - a single edge server: an LDM with object matching + the PyCA
-#     centralized Collision Avoidance service (CA/PyCA/t2c.py, Algorithm 1:
+#     centralized Collision Avoidance service (PyCA/t2c.py, Algorithm 1:
 #     t2c/s2c analytic check), fed with the CAV detections and (optionally)
 #     the received VAMs;
-#   - the ns-3 v2x-bridge (ns-3-dev/scratch/v2x-bridge) through
-#     ns3_bridge_client.py: every CAV->edge detection upload, VRU->edge VAM
-#     and edge->CAV warning is one simulated packet over the 5G NR network,
-#     carrying the actual application payload; the receiver-side logic runs
-#     only when (and if) the bridge reports the packet as delivered.
+#   - the ns-3 drivex-bridge through ns3_bridge_client.py: every CAV->edge
+#     detection upload, VRU->edge VAM and edge->CAV warning is one simulated
+#     packet, carrying the actual application payload, over the access
+#     technology the bridge was started with (NR Uu, IEEE 802.11p, IEEE
+#     802.11bd or the NR-V2X sidelink); the receiver-side logic runs only
+#     when (and if) the bridge reports the packet as delivered.
 #
-# Three application modes (used by OpenCDA/CA/run_ca_extended.py):
+# Three application modes (used by run_ca_extended.py):
 #   mode 2: CAVs detect VRUs (no VAMs), store the detections in their local
-#           LDM and upload them to the edge over 5G; the edge LDM + PyCA CA
-#           generate the warnings, sent back to the involved CAVs over 5G;
+#           LDM and upload them to the edge; the edge LDM + PyCA CA generate
+#           the warnings, sent back to the involved CAVs;
 #   mode 3: same as mode 2, but the VRUs also transmit VAMs to the edge as
 #           additional information for the collision avoidance;
 #   mode 4: V2X-only. The VRUs transmit VAMs as in mode 3, but the CAVs keep
@@ -35,7 +41,9 @@
 # the whole python_vru_service package (x = east, y = north, compass heading
 # from north): CARLA world coordinates map as x_enu = x, y_enu = -y and
 # heading_enu = (carla_yaw + 90) % 360. The bridge entity positions stay in
-# raw CARLA coordinates (they only feed the ns-3 radio geometry).
+# raw CARLA coordinates (they only feed the ns-3 radio geometry); a VRU's
+# entity also carries its geographic position and compass heading, which is
+# what its VAMs are filled with.
 #
 
 import csv
@@ -48,12 +56,10 @@ import time
 try:
     from . import vam_codec
     from .ldm import LDM
-    from .vru_basic_service import VRUBasicService, VamStatsRecorder
     from .geo_utils import GeoConverter
-except ImportError:                      # imported outside the CA package
+except ImportError:                      # imported outside the package
     import vam_codec
     from ldm import LDM
-    from vru_basic_service import VRUBasicService, VamStatsRecorder
     from geo_utils import GeoConverter
 
 # PyCA collision avoidance (lives in the parent CA package)
@@ -113,7 +119,7 @@ def carla_long_acceleration(actor):
 
 
 def bridge_entity(name, type_name, actor, timestamp):
-    """Entity-state dict in the v2x-bridge schema (raw CARLA coordinates;
+    """Entity-state dict in the bridge schema (raw CARLA coordinates;
     Heading in radians as per the bridge protocol)."""
     loc = actor.get_location()
     return {"timestamp": round(timestamp, 3),
@@ -123,6 +129,27 @@ def bridge_entity(name, type_name, actor, timestamp):
                          "z_m": round(loc.z, 3)},
             "Velocity": round(carla_speed(actor), 3),
             "Heading": round(math.radians(carla_compass_heading(actor)), 4)}
+
+
+def bridge_vru_entity(name, type_name, actor, timestamp, carla_map,
+                      station_id, station_type):
+    """Entity-state of a connected VRU: the bridge entity plus what its VRU
+    Basic Service (DriveX's, inside ns-3) needs to fill and trigger its VAMs.
+    The VRU knows this about itself (the GNSS/IMU of its device): it is
+    self-knowledge, not perception."""
+    entity = bridge_entity(name, type_name, actor, timestamp)
+    loc = actor.get_location()
+    geo = carla_map.transform_to_geolocation(loc)
+    entity["station_id"] = int(station_id)
+    entity["station_type"] = int(station_type)
+    entity["Geo"] = {"lat": round(geo.latitude, 9),
+                     "lon": round(geo.longitude, 9),
+                     "alt": round(geo.altitude, 3)}
+    entity["heading_deg"] = round(carla_compass_heading(actor), 3)
+    acceleration = carla_long_acceleration(actor)
+    if acceleration is not None:
+        entity["Acceleration"] = round(acceleration, 3)
+    return entity
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +165,9 @@ class CavV2XManager:
     unchanged) but the uplink carries the ego state alone: the edge never
     receives a CAV-perceived object."""
 
-    def __init__(self, name, actor, station_id, layer, quiet):
+    def __init__(self, name, actor, station_id, layer, quiet, index=0):
         self.name = name
+        self.index = int(index)
         self.actor = actor
         self.station_id = station_id
         self.layer = layer
@@ -217,79 +245,86 @@ class CavV2XManager:
             kind="detection", payload=payload,
             entities=[bridge_entity(self.name, "cav", self.actor, sim_time)],
             on_delivered=self.layer.edge.on_detections_delivered,
-            app_processing_ms=prep_ms)
+            app_processing_ms=prep_ms,
+            delay_s=self.index * self.layer.uplink_stagger_s)
 
 
 # ---------------------------------------------------------------------------
 # VRU: VAM transmission through the VRU Basic Service, over ns-3
 # ---------------------------------------------------------------------------
-class VruVamManager:
-    """VRU Basic Service on board of one VRU (pedestrian walker or bike):
-    VAMs are triggered on the ETSI conditions (simulation-time reference,
-    manual stepping after every tick) and transmitted to the edge server as
-    simulated 5G packets through the ns-3 bridge."""
+class VamStats:
+    """VBS_stats.csv: one row per VAM generated by a VRU Basic Service of the
+    bridge, from the "vam_tx" messages it sends, plus the per-VRU counters
+    of the run summary.
 
-    def __init__(self, name, actor, station_type, carla_map, layer,
-                 geo_origin, quiet):
-        self.name = name
-        self.actor = actor
-        self.carla_map = carla_map
-        self.layer = layer
-        self.quiet = quiet
-        self.type_name = STATION_TYPE_NAMES.get(station_type, "pedestrian")
-        self.srv = VRUBasicService(station_id=layer.station_of[name],
-                                   station_type=station_type,
-                                   proximity_check=False,
-                                   ref_lat=geo_origin[0],
-                                   ref_lon=geo_origin[1])
-        # Time reference: the CARLA/OpenCDA simulation clock, not the wall clock
-        self.srv.set_timestamp_callback(lambda: self.layer.sim_time)
-        self.srv.set_tx_callback(self._on_tx)
-        # Per-VAM statistics log (VBS_stats.csv), shared by every VRU of the run
-        if layer.vam_stats is not None:
-            self.srv.set_vam_stats(layer.vam_stats, station_label=name)
-        self._initialized = False
-        self._step_started = None
+    The service is DriveX's and runs in ns-3: what is logged here is what the
+    bridge reports of each VAM (the state it was filled with, when it was
+    generated, the time since the previous VAM of that VRU). The triggering
+    condition is the bridge's reading of why the VAM was due: the first
+    condition, in the order the service checks them, that the VRU's state
+    crossed since its previous VAM (heading, position, speed), "time" when
+    none did, "start" for the first one."""
 
-    def _on_tx(self, encoded_vam):
-        if not self.quiet:
-            print("[VRU %s] VAM TX trigger=%-19s %d bytes"
-                  % (self.name, self.srv.m_trigg_cond.name, len(encoded_vam)))
-        # VRU -> edge VAM over the simulated 5G network (the UPER bytes are
-        # the application payload of the simulated packet)
-        processing_ms = (time.perf_counter() - self._step_started) * 1000.0 \
-            if self._step_started is not None else 0.0
-        self.layer.send_packet(
-            sender=self.name, receiver="BS", ptype="detection", kind="vam",
-            payload=bytes(encoded_vam),
-            entities=[bridge_entity(self.name, self.type_name, self.actor,
-                                    self.layer.sim_time)],
-            on_delivered=self.layer.edge.on_vam_delivered,
-            app_processing_ms=processing_ms)
+    COLUMNS = ["gen_time_s", "sender_id", "sender_name", "station_type",
+               "latitude_deg", "longitude_deg", "x_m", "y_m", "speed_ms",
+               "heading_deg", "dt_last_vam_s", "avg_period_vru_s",
+               "avg_period_all_s", "trigger_condition", "vam_count_vru",
+               "vam_count_all", "packet_id", "pdu_bytes"]
 
-    def step(self):
-        # The VRU reads its own kinematic state from its CARLA actor: this is
-        # self-knowledge (the GNSS/IMU of the VRU device), not perception
-        self._step_started = time.perf_counter()
-        geo = self.carla_map.transform_to_geolocation(self.actor.get_location())
-        self.srv.set_ego_vru_kstatus(
-            self.srv.m_station_id, self.srv.m_stationtype,
-            lat=geo.latitude, lon=geo.longitude,
-            speed=carla_speed(self.actor),
-            heading=carla_compass_heading(self.actor),
-            acceleration=carla_long_acceleration(self.actor))
-        if not self._initialized:
-            # initial VAM (DISSEMINATION_START); retry on the next tick if
-            # the generation failed (the error would otherwise surface as an
-            # opaque RuntimeError at the first check_vam_conditions())
-            err = self.srv.init_dissemination()
-            if err is not None and err.value != 0:
-                print("[VRU %s] initial VAM failed (%s), retrying next tick"
-                      % (self.name, err.name))
-            else:
-                self._initialized = True
-        else:
-            self.srv.check_vam_conditions()  # one manual check per tick
+    def __init__(self, path, geo_converter):
+        self.geo_converter = geo_converter
+        self._file = open(path, "w", newline="")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(self.COLUMNS)
+        self.per_vru = {}        # name -> {count, interval sum, intervals,
+        #                                   trigger counts}
+        self.total = 0
+        self._interval_sum = 0.0
+        self._interval_count = 0
+
+    @staticmethod
+    def _fmt(value, fmt="%.6f"):
+        return "" if value is None else fmt % value
+
+    def record(self, event, gen_time_s):
+        name = event.get("sender", "")
+        state = self.per_vru.setdefault(
+            name, {"count": 0, "sum": 0.0, "n": 0, "triggers": {}})
+        state["count"] += 1
+        self.total += 1
+        trigger = event.get("trigger", "")
+        state["triggers"][trigger] = state["triggers"].get(trigger, 0) + 1
+        dt = None
+        if event.get("since_previous_ms") is not None:
+            dt = float(event["since_previous_ms"]) / 1000.0
+            state["sum"] += dt
+            state["n"] += 1
+            self._interval_sum += dt
+            self._interval_count += 1
+        x = y = None
+        if self.geo_converter is not None:
+            x, y = self.geo_converter.latlon_to_xy(event["lat"], event["lon"])
+        self._writer.writerow([
+            self._fmt(gen_time_s, "%.3f"), event.get("station_id", ""), name,
+            event.get("station_type", ""),
+            self._fmt(event.get("lat"), "%.7f"),
+            self._fmt(event.get("lon"), "%.7f"),
+            self._fmt(x, "%.3f"), self._fmt(y, "%.3f"),
+            self._fmt(event.get("speed"), "%.3f"),
+            self._fmt(event.get("heading_deg"), "%.1f"),
+            self._fmt(dt, "%.3f"),
+            self._fmt(state["sum"] / state["n"] if state["n"] else None,
+                      "%.4f"),
+            self._fmt(self._interval_sum / self._interval_count
+                      if self._interval_count else None, "%.4f"),
+            trigger, state["count"], self.total,
+            event.get("packet_id", ""), event.get("pdu_bytes", "")])
+        self._file.flush()
+
+    def close(self):
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 # ---------------------------------------------------------------------------
@@ -387,9 +422,15 @@ class EdgeCAServer:
         finally:
             self._uplink_ctx = None
 
-    def on_vam_delivered(self, reply, payload, meta):
-        """One VRU VAM delivered to the edge by ns-3: decode the UPER bytes
-        and store/update the VRU in the edge LDM."""
+    def on_vam_delivered(self, reply, meta):
+        """One VRU VAM delivered to the edge by ns-3 and decoded there by
+        DriveX's facilities (reply["vam"]): store/update the VRU in the edge
+        LDM."""
+        vam = reply.get("vam")
+        if not vam:
+            print("[EDGE] VAM of %s reached the edge but was not decoded"
+                  % meta.get("sender"))
+            return
         self._uplink_ctx = {"kind": meta["kind"],
                             "packet_id": reply.get("packet_id"),
                             "latency_ms": reply.get("latency_ms"),
@@ -397,15 +438,18 @@ class EdgeCAServer:
                             "sender": meta.get("sender"),
                             "tx_sim_t": float(meta.get(
                                 "tx_sim_t", self.layer.sim_time))}
+        station_id = int(vam["station_id"])
         try:
-            err, station_id = self.ldm.add_vru_from_vam(
-                bytes(payload), geo_converter=self.geo_converter,
-                timestamp=self._uplink_ctx["tx_sim_t"])
+            lat, lon = float(vam["lat"]), float(vam["lon"])
+            x, y = self.geo_converter.latlon_to_xy(lat, lon)
+            self.ldm.insert(station_id, int(vam["station_type"]), x=x, y=y,
+                            lat=lat, lon=lon, speed=float(vam["speed"]),
+                            heading=float(vam["heading_deg"]),
+                            acceleration=vam.get("acceleration"),
+                            timestamp=self._uplink_ctx["tx_sim_t"],
+                            match_connected=True)
         finally:
             self._uplink_ctx = None
-        if station_id is None:
-            print("[EDGE] undecodable VAM discarded (%s)" % err)
-            return
         for old_id, _ in self.ldm.consume_rekeyed_ids():
             self.cas.remove(str(old_id))
         obj = self.ldm.lookup(station_id)
@@ -537,11 +581,13 @@ class EdgeCAServer:
 # The V2X layer glued into run_ca_extended.py
 # ---------------------------------------------------------------------------
 class V2XLayer:
-    """Orchestrates CAV managers, VRU managers (modes 3/4), the edge server
-    and the ns-3 bridge client inside the OpenCDA CA main loop."""
+    """Orchestrates the CAV managers, the connected VRUs (modes 3/4: their
+    VRU Basic Service runs in the bridge), the edge server and the ns-3
+    bridge client inside the CA main loop."""
 
     def __init__(self, bridge, mode, carla_map, cav_actors, vru_actors,
-                 ca_cfg, run_dir, pump_wait_s=0.25, quiet=True):
+                 ca_cfg, run_dir, pump_wait_s=0.25, quiet=True,
+                 uplink_stagger_s=0.0):
         """cav_actors: list of (name, carla_vehicle); vru_actors: list of
         (name, actor, etsi_station_type) — used only in modes 3 and 4."""
         self.bridge = bridge
@@ -553,8 +599,15 @@ class V2XLayer:
         self.carla_map = carla_map
         self.pump_wait_s = float(pump_wait_s)
         self.quiet = quiet
+        # CAV i sends its uplink i * uplink_stagger_s after the tick: by
+        # default every CAV sends in the same instant, which a radio whose
+        # stations pick their own resources (the NR-V2X sidelink in mode 2)
+        # pays with collisions
+        self.uplink_stagger_s = float(uplink_stagger_s)
         self.sim_time = 0.0
         self.step_no = -1
+        self._first_step = 0
+        self._dt = None
 
         # Geo-origin of the map: shared reference of the ENU frame so that
         # the x/y decoded from the VAMs matches the CAV detections
@@ -577,34 +630,37 @@ class V2XLayer:
             self.station_of[name] = VRU_STATION_BASE + i
 
         # Per-VAM log of the VRU Basic Services (VBS_stats.csv): one row per
-        # transmitted VAM with its content, the time since the previous VAM of
+        # generated VAM with its content, the time since the previous VAM of
         # the same VRU and the running average VAM periodicity, per VRU and
         # pooled over all of them. Created only in the modes where the VRUs do
-        # transmit VAMs (3 and 4); the recorder is shared by every VRU service.
+        # transmit VAMs (3 and 4).
         self.vam_stats = None
         if self.mode >= 3 and vru_actors:
-            self.vam_stats = VamStatsRecorder(
-                os.path.join(run_dir, "VBS_stats.csv"),
-                geo_converter=geo_converter)
+            self.vam_stats = VamStats(
+                os.path.join(run_dir, "VBS_stats.csv"), geo_converter)
 
         self.edge = EdgeCAServer(self, geo_converter, ca_cfg, quiet)
         self.cav_managers = [
-            CavV2XManager(name, actor, self.station_of[name], self, quiet)
-            for name, actor in cav_actors]
-        self.vru_managers = []
-        if self.mode >= 3:
-            self.vru_managers = [
-                VruVamManager(name, actor, station_type, carla_map, self,
-                              self.geo_origin, quiet)
-                for name, actor, station_type in vru_actors]
+            CavV2XManager(name, actor, self.station_of[name], self, quiet,
+                          index=i)
+            for i, (name, actor) in enumerate(cav_actors)]
 
-        # Entities refreshed on the bridge every tick: the connected actors
+        # Entities refreshed on the bridge every tick: the connected actors.
+        # In modes 3/4 the VRUs are connected: the bridge runs a VRU Basic
+        # Service for each one it is told about.
         self._entity_defs = [(name, "cav", actor)
                              for name, actor in cav_actors]
+        self._vru_defs = []
         if self.mode >= 3:
-            self._entity_defs += [
-                (name, STATION_TYPE_NAMES.get(st, "pedestrian"), actor)
+            self._vru_defs = [
+                (name, STATION_TYPE_NAMES.get(st, "pedestrian"), actor, st)
                 for name, actor, st in vru_actors]
+        self._vam_tx = {}            # packet id -> its "vam_tx" message
+        self._first_sim_time = None
+        self._scene_sent = False
+        self.gn_beacons = {}         # status -> GeoNetworking beacons
+        bridge.on_vam_tx = self._on_vam_tx
+        bridge.on_bridge_packet = self._on_bridge_packet
 
         # Warnings received by each CAV since its last metrics row
         self._row_warnings = {name: [] for name, _ in cav_actors}
@@ -617,7 +673,8 @@ class V2XLayer:
         self._v2x_csv = csv.writer(self._v2x_csv_file)
         self._v2x_csv.writerow(["packet_id", "kind", "sender", "receiver",
                                 "size_bytes", "tx_step", "tx_sim_t",
-                                "app_processing_ms", "status", "latency_ms"])
+                                "app_processing_ms", "status", "latency_ms",
+                                "link"])
         self._warn_csv_file = open(os.path.join(run_dir, "edge_warnings.csv"),
                                    "w", newline="")
         self._warn_csv = csv.writer(self._warn_csv_file)
@@ -656,38 +713,42 @@ class V2XLayer:
             "local_object_id", "canonical_object_id", "x", "y",
             "uplink_packet_id"])
 
-        n_ues = len(self._entity_defs)
-        print("[V2X] mode %d: %d CAV LDM(s), %d VRU VAM service(s), edge "
-              "server with PyCA collision avoidance; %d connected UEs "
-              "(run the v2x-bridge with --maxUes >= %d)"
-              % (self.mode, len(self.cav_managers), len(self.vru_managers),
-                 n_ues, n_ues))
+        n_ues = len(self._entity_defs) + len(self._vru_defs)
+        print("[V2X] mode %d: %d CAV LDM(s), %d connected VRU(s) (VRU Basic "
+              "Service in ns-3), edge server with PyCA collision avoidance; "
+              "%d connected stations (run the drivex-bridge with --maxUes "
+              ">= %d%s)"
+              % (self.mode, len(self.cav_managers), len(self._vru_defs),
+                 n_ues, n_ues, " and --vbs=1" if self._vru_defs else ""))
         if not self.upload_detections:
             print("[V2X] V2X-only policy: CAV detections are NOT uploaded "
                   "(ego state only) and the edge checks CAV<->VRU pairs only")
 
     # ------------------------------------------------------------------
     def send_packet(self, sender, receiver, ptype, kind, payload,
-                    entities=None, on_delivered=None, app_processing_ms=0.0):
+                    entities=None, on_delivered=None, app_processing_ms=0.0,
+                    delay_s=0.0):
         """All simulated packets go through here so every outcome lands in
-        v2x_packets.csv."""
+        v2x_packets.csv. delay_s: send it this long after the tick."""
+        tx_time = self.sim_time + float(delay_s)
         meta = {"kind": kind, "sender": sender, "receiver": receiver,
-                "tx_step": self.step_no, "tx_sim_t": self.sim_time,
+                "tx_step": self.step_no, "tx_sim_t": tx_time,
                 "app_processing_ms": float(app_processing_ms)}
 
         def delivered(reply, rx_payload, _meta):
             self._log_packet(reply.get("packet_id"), meta,
                              12 + len(payload), "delivered",
-                             reply.get("latency_ms"))
+                             reply.get("latency_ms"), reply.get("link"))
             if on_delivered is not None:
                 on_delivered(reply, rx_payload, meta)
 
         def failed(reply, _meta):
             self._log_packet(reply.get("packet_id"), meta, 12 + len(payload),
-                             reply.get("status", "no_reply"), None)
+                             reply.get("status", "no_reply"), None,
+                             reply.get("link"))
 
         return self.bridge.send_packet(
-            self.sim_time, sender, receiver, ptype, payload=payload,
+            tx_time, sender, receiver, ptype, payload=payload,
             entities=entities, kind=kind, meta=meta,
             on_delivered=delivered, on_failed=failed)
 
@@ -723,14 +784,73 @@ class V2XLayer:
             ctx.get("sender") or "", "%.6f" % ca_ms, packet_id])
         self._risk_csv_file.flush()
 
-    def _log_packet(self, packet_id, meta, size, status, latency_ms):
+    def _log_packet(self, packet_id, meta, size, status, latency_ms,
+                    link=None):
         self._v2x_csv.writerow(
             [packet_id if packet_id is not None else "", meta["kind"],
              meta["sender"], meta["receiver"], size, meta["tx_step"],
              "%.3f" % meta["tx_sim_t"],
              "%.6f" % meta.get("app_processing_ms", 0.0), status,
-             "%.3f" % latency_ms if latency_ms is not None else ""])
+             "%.3f" % latency_ms if latency_ms is not None else "",
+             link or ""])
         self._v2x_csv_file.flush()
+
+    # ------------------------------------------------------------------
+    # traffic the bridge originates: the VAMs (and GeoNetworking beacons)
+    # of the VRU Basic Services it runs
+    # ------------------------------------------------------------------
+    def _step_of(self, sim_t):
+        """Simulation step a time of the application clock falls in."""
+        if self._first_sim_time is None or self._dt is None:
+            return self.step_no
+        return self._first_step + int(math.floor(
+            (sim_t - self._first_sim_time) / self._dt + 1e-6))
+
+    def _on_vam_tx(self, event):
+        """A VRU Basic Service generated a VAM."""
+        gen_t = event.get("ext_time_s")
+        if gen_t is None:
+            gen_t = self.sim_time
+        event["_gen_t"] = float(gen_t)
+        self._vam_tx[event["packet_id"]] = event
+        if self.vam_stats is not None:
+            self.vam_stats.record(event, float(gen_t))
+        if not self.quiet:
+            print("[VRU %s] VAM generated in ns-3 (%s), %d B"
+                  % (event.get("sender"), event.get("trigger"),
+                     event.get("pdu_bytes", 0)))
+
+    def _on_bridge_packet(self, reply, payload):
+        """A VAM or a GeoNetworking beacon of a VRU reached the edge, or was
+        lost on the way."""
+        sender = reply.get("sender", "")
+        status = reply.get("status", "?")
+        if reply.get("type") == "beacon":
+            self.gn_beacons[status] = self.gn_beacons.get(status, 0) + 1
+            rx_t = reply.get("ext_time_s")
+            if rx_t is None:
+                rx_t = self.sim_time
+            latency = reply.get("latency_ms")
+            tx_t = float(rx_t) - (latency or 0.0) / 1000.0
+            meta = {"kind": "gn_beacon", "sender": sender, "receiver": "BS",
+                    "tx_step": self._step_of(tx_t), "tx_sim_t": tx_t,
+                    "app_processing_ms": 0.0}
+            self._log_packet(reply.get("packet_id"), meta, "", status,
+                             latency if status == "delivered" else None,
+                             reply.get("link"))
+            return
+        event = self._vam_tx.pop(reply.get("packet_id"), None)
+        gen_t = event["_gen_t"] if event else self.sim_time
+        size = 12 + int(event["pdu_bytes"]) if event else ""
+        meta = {"kind": "vam", "sender": sender, "receiver": "BS",
+                "tx_step": self._step_of(gen_t), "tx_sim_t": gen_t,
+                "app_processing_ms": 0.0}
+        self._log_packet(reply.get("packet_id"), meta, size, status,
+                         reply.get("latency_ms")
+                         if status == "delivered" else None,
+                         reply.get("link"))
+        if status == "delivered":
+            self.edge.on_vam_delivered(reply, meta)
 
     # ------------------------------------------------------------------
     def on_warning_delivered(self, reply, payload, meta):
@@ -796,20 +916,36 @@ class V2XLayer:
         """One co-simulation tick: refresh the scene on the bridge, upload
         the CAV detections, step the VRU services, then resolve the ns-3
         deliveries (uplink first, then the warnings they may have caused)."""
+        if self._first_sim_time is None:
+            self._first_sim_time = float(sim_time)
+            self._first_step = int(step_no)
+        elif self._dt is None and step_no > self._first_step:
+            self._dt = (float(sim_time) - self._first_sim_time) / \
+                (step_no - self._first_step)
         self.step_no = step_no
         self.sim_time = float(sim_time)
 
-        # Scene update for the radio geometry (one entities-only datagram)
-        self.bridge.send_entities(
-            self.sim_time,
-            [bridge_entity(name, tname, actor, self.sim_time)
-             for name, tname, actor in self._entity_defs])
+        # Scene update (one entities-only datagram): the radio geometry of
+        # every connected station and, for the VRUs, the state their VRU
+        # Basic Service in the bridge works on
+        entities = [bridge_entity(name, tname, actor, self.sim_time)
+                    for name, tname, actor in self._entity_defs]
+        entities += [bridge_vru_entity(name, tname, actor, self.sim_time,
+                                       self.carla_map,
+                                       self.station_of[name], station_type)
+                     for name, tname, actor, station_type in self._vru_defs]
+        extra = None
+        if not self._scene_sent:
+            # where the edge station is, for its GeoNetworking: the map
+            # origin is as good as any place for a station nobody locates
+            extra = {"edge_geo": {"lat": self.geo_origin[0],
+                                  "lon": self.geo_origin[1]}}
+            self._scene_sent = True
+        self.bridge.send_entities(self.sim_time, entities, extra)
 
         for manager in self.cav_managers:
             manager.on_tracks(tracks_by_cav.get(manager.name, []),
                               self.sim_time)
-        for vru in self.vru_managers:
-            vru.step()
 
         # 1st pump: detections/VAMs delivered at the edge -> LDM + collision
         # avoidance -> warning packets queued; 2nd pump: warning deliveries.
@@ -827,7 +963,7 @@ class V2XLayer:
         if self.vam_stats is not None:
             self.vam_stats.close()
         edge = self.edge
-        lines = ["", "V2X layer (mode %d, ns-3 v2x-bridge in the loop):"
+        lines = ["", "V2X layer (mode %d, ns-3 drivex-bridge in the loop):"
                  % self.mode]
         lines += ["  " + line for line in self.bridge.summary_lines()]
         lines.append("  edge server : %d detection upload(s) and %d VAM(s) "
@@ -849,11 +985,20 @@ class V2XLayer:
                 lines.append("  %-6s: no edge warnings received, local LDM "
                              "with %d object(s)"
                              % (manager.name, manager.ldm.get_cardinality()))
-        for vru in self.vru_managers:
-            if vru.srv.m_vam_sent:
-                lines.append("  %-6s: %d VAM(s) sent (pos %d, speed %d, "
-                             "head %d, time %d)"
-                             % (vru.name, vru.srv.m_vam_sent,
-                                vru.srv.m_pos_sent, vru.srv.m_speed_sent,
-                                vru.srv.m_head_sent, vru.srv.m_time_sent))
+        if self.vam_stats is not None:
+            for name in sorted(self.vam_stats.per_vru):
+                state = self.vam_stats.per_vru[name]
+                why = state["triggers"]
+                lines.append("  %-7s: %d VAM(s) generated (position %d, "
+                             "speed %d, heading %d, time %d)%s"
+                             % (name, state["count"], why.get("position", 0),
+                                why.get("speed", 0), why.get("heading", 0),
+                                why.get("time", 0),
+                                ", one every %.2f s" % (state["sum"] /
+                                                        state["n"])
+                                if state["n"] else ""))
+        if self.gn_beacons:
+            lines.append("  GeoNetworking beacons of the VRUs: %s"
+                         % ", ".join("%d %s" % (self.gn_beacons[k], k)
+                                     for k in sorted(self.gn_beacons)))
         return lines

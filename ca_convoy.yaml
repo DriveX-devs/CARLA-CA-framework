@@ -2,10 +2,9 @@ description: |-
   CA (Cooperative Awareness) scenario: 4 independent CAVs approaching the
   central Town10HD_Opt intersection from its four arms, plus background
   traffic, bikes and pedestrians. Every CAV drives freely on Traffic Manager
-  autopilot and carries 4 RGB cameras + 1 LiDAR with its OWN YOLOv8 model;
-  camera detections are fused with the LiDAR sweep to estimate the position,
-  velocity and heading of every vehicle / bike / pedestrian it sees.
-  Inspired by dataset_generator/scenario_configs/default.yaml.
+  autopilot and perceives the scene with SiMO (LiDAR by default) to estimate
+  the position, velocity and heading of every vehicle / bike / pedestrian it
+  sees. YOLOv8 + camera/LiDAR fusion remains available as a backend.
 
 # ---- carla world -----------------------------------------------------------
 world:
@@ -26,7 +25,14 @@ world:
 
 # ---- scenario --------------------------------------------------------------
 scenario:
+  # any installed map: Town01..Town07, Town10HD (each also as *_Opt), and with
+  # the AdditionalMaps package Town06, Town07, Town11, Town12, Town13, Town15.
+  # The CAV spawn points, the traffic centre and the gNB / RSU position below
+  # belong to the map: see the scenarios/ directory for other towns.
   town: Town10HD_Opt
+  # the static parked vehicles of a layered (*_Opt) map: true keeps them (they
+  # are then ground truth for the detection AP), false unloads that layer
+  parked_vehicles: true
   duration_seconds: 40
   warmup_steps: 10                   # ticks before perception starts
   # each CAV spawns at its own point and drives freely on TM autopilot
@@ -62,19 +68,86 @@ scenario:
     speed: 1.4                       # m/s
     cross_factor: 0.1                # fraction of walkers allowed to cross
 
-# ---- sensor rig (per CAV) --------------------------------------------------
+# ---- perception ------------------------------------------------------------
+perception:
+  backend: simo                      # simo | yolo | oracle (--perception)
+
+# SiMO, the base model (simo_perception.py). `package_dir` is the directory
+# holding simo_proto/, configs/ and weights/; relative paths are resolved from
+# this repository, and SIMO_PACKAGE_DIR overrides it.
+simo:
+  package_dir: ../simo_proto
+  config: configs/simo_mm10.yaml
+  weights: weights/simo_mm10_proto_2026-11-11.pth
+  sensors: lidar                     # lidar | camera | both (--simo-sensors)
+  # none: each CAV detects from its own sensors only.
+  # ideal: each CAV also fuses the SiMO messages of the CAVs within
+  #        comm_range_m, handed over in-process (no network, no delay).
+  cooperation: none                  # --simo-cooperation
+  comm_range_m: 80.0
+  single_agent_reference: true       # with ideal: also score each CAV alone
+  # LiDAR history given to the model: the current sweep plus the previous
+  # ones, sweep_interval_s apart (the model was trained with up to 10 sweeps
+  # 0.43 s apart). 1 = the current sweep only.
+  sweeps: 1                          # --simo-sweeps
+  sweep_interval_s: 0.43
+  score_threshold:                   # detections below it never become tracks
+    vehicle: 0.30
+    bike: 0.30
+    pedestrian: 0.30
+  ego_mask_margin: 0.3               # m around the ego box cleared of returns
+  # GPUs of the SiMO models: CAV i runs on devices[i % len(devices)]
+  devices: [cuda:0]                  # --simo-devices cuda:0,cuda:1
+  # The rig the model was trained on (SimBEV2X vehicles): roof LiDAR keeping
+  # 32 of 128 rings between -30.67 and +10.67 degrees, 2048 points per ring,
+  # and six 1600x900 cameras with an 80 degree field of view. The cameras are
+  # spawned only when `sensors` uses them.
+  sensing:
+    lidar:
+      x: 0.0
+      z: 1.8
+      channels: 32
+      range: 120
+      points_per_second: 1310720     # 32 rings x 2048 points x 20 Hz
+      rotation_frequency: 20         # full sweep every sim tick
+      upper_fov: 9.69
+      lower_fov: -30.67
+      dropoff_general_rate: 0.1
+      dropoff_intensity_limit: 0.8
+      dropoff_zero_intensity: 0.4
+      noise_stddev: 0.0
+    camera:
+      image_size_x: 1600
+      image_size_y: 900
+      fov: 80
+      names: [front, front_right, front_left, back, back_right, back_left]
+      positions:                     # relative (x, y, z, yaw)
+        - [ 0.6,  0.0, 1.6,    0]
+        - [ 0.4,  0.4, 1.6,   55]
+        - [ 0.4, -0.4, 1.6,  -55]
+        - [-1.0,  0.0, 1.6,  180]
+        - [ 0.0,  0.4, 1.6,  110]
+        - [ 0.0, -0.4, 1.6, -110]
+
+# oracle backend: ground-truth objects the CAV's LiDAR hits, as detections
+oracle:
+  min_points: 5
+  range_m: 54.4
+
+# ---- sensor rig of the YOLOv8 backend (per CAV) ----------------------------
 sensing:
   camera:
     image_size_x: 1920               # Full-HD cameras
     image_size_y: 1080
     fov: 100
-    # relative (x, y, z, yaw) — same layout as the OpenCDA/OPV2V 4-camera rig
+    # relative (x, y, z, yaw): the OPV2V 4-camera layout
     positions:
       - [2.5,  0.0, 1.0,    0]      # front
       - [0.0,  0.3, 1.8,  100]      # right
       - [0.0, -0.3, 1.8, -100]      # left
       - [-2.0, 0.0, 1.5,  180]      # rear
   lidar:
+    x: -0.5
     z: 1.9                           # mount height above vehicle origin
     channels: 64
     range: 100
@@ -87,10 +160,10 @@ sensing:
     dropoff_zero_intensity: 0.2
     noise_stddev: 0.01
 
-# ---- detection + fusion ----------------------------------------------------
+# ---- YOLOv8 detection + camera/LiDAR fusion (yolo backend only) ------------
 detection:
   model_capacity: n                  # n | m | x  (yolov8<capacity>.pt)
-  weights_dir: CA/models
+  weights_dir: models
   confidence: 0.40
   # COCO ids: 0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
   classes: [0, 1, 2, 3, 5, 7]
@@ -113,7 +186,7 @@ fusion:
     bike: 1.5
     pedestrian: 1.0
 
-# ---- collision avoidance (PyCA, CA/PyCA/t2c.py) -----------------------------
+# ---- collision avoidance (PyCA, PyCA/t2c.py) -------------------------------
 # Every step, each CAV runs the t2c/s2c check between its own TRUE state
 # (position/velocity/acceleration from the simulator: a real vehicle knows
 # its own kinematics) and every confirmed track (fused position + Kalman
@@ -144,10 +217,18 @@ tracking:
 
 # ---- evaluation / output ---------------------------------------------------
 output:
-  root: CA/output
+  root: output
   save_stride: 20                    # save annotated frames every N steps
   print_stride: 20                   # console status every N steps
   eval_match_dist:                   # max distance to match a track to a GT object
     vehicle: 4.0
     bike: 2.5
     pedestrian: 2.0
+
+# detection AP against CARLA ground truth (ap_eval.py), written to ap.json
+evaluation:
+  ap: true
+  ap_stride: 2                       # score every N-th step
+  ap_skip_seconds: 0.0               # leave out the first seconds of a run
+  eval_range_m: 54.4                 # the model's range around the receiver
+  min_lidar_points: 1                # LiDAR returns for an object to count
